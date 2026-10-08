@@ -17,9 +17,6 @@ type BarcodeScannerProps = {
   onClose?: () => void;
 };
 
-/**
- * Detect virtual cameras so we can prefer real hardware cameras.
- */
 function isVirtualCamera(label: string) {
   const name = label.toLowerCase();
 
@@ -34,9 +31,6 @@ function isVirtualCamera(label: string) {
   );
 }
 
-/**
- * Detect rear/environment cameras.
- */
 function isRearCamera(label: string) {
   const name = label.toLowerCase();
 
@@ -52,14 +46,16 @@ export default function BarcodeScanner({
   onScan,
   onClose,
 }: BarcodeScannerProps) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoRef =
+    useRef<HTMLVideoElement | null>(null);
 
   const readerRef =
     useRef<BrowserMultiFormatReader | null>(null);
 
-  const controlsRef = useRef<{
-    stop: () => void;
-  } | null>(null);
+  const controlsRef =
+    useRef<{
+      stop: () => void;
+    } | null>(null);
 
   const streamRef =
     useRef<MediaStream | null>(null);
@@ -81,7 +77,8 @@ export default function BarcodeScanner({
   const [loading, setLoading] =
     useState(true);
 
-  const [error, setError] = useState("");
+  const [error, setError] =
+    useState("");
 
   const [scannedBarcode, setScannedBarcode] =
     useState("");
@@ -97,11 +94,6 @@ export default function BarcodeScanner({
 
   const [zoom, setZoom] = useState(1);
 
-  /**
-   * -------------------------------------------------------
-   * LOAD ALL CAMERAS
-   * -------------------------------------------------------
-   */
   async function loadCameras() {
     setLoading(true);
     setError("");
@@ -118,11 +110,6 @@ export default function BarcodeScanner({
         return;
       }
 
-      /**
-       * Ask for camera permission first.
-       * This is important because camera labels can
-       * sometimes be hidden until permission is granted.
-       */
       const permissionStream =
         await navigator.mediaDevices.getUserMedia({
           video: true,
@@ -133,9 +120,6 @@ export default function BarcodeScanner({
         .getTracks()
         .forEach((track) => track.stop());
 
-      /**
-       * Get every available video input.
-       */
       const devices =
         await BrowserMultiFormatReader.listVideoInputDevices();
 
@@ -149,12 +133,6 @@ export default function BarcodeScanner({
         return;
       }
 
-      /**
-       * Prefer physical cameras over virtual cameras.
-       *
-       * If there are no physical cameras, we still allow
-       * virtual cameras.
-       */
       const physicalCameras = devices.filter(
         (device) =>
           !isVirtualCamera(device.label),
@@ -175,11 +153,9 @@ export default function BarcodeScanner({
 
       setCameras(cameraList);
 
-      /**
-       * Prefer a rear/environment camera when available.
-       */
-      const rearCamera = cameraList.find((camera) =>
-        isRearCamera(camera.label),
+      const rearCamera = cameraList.find(
+        (camera) =>
+          isRearCamera(camera.label),
       );
 
       if (rearCamera) {
@@ -229,11 +205,6 @@ export default function BarcodeScanner({
     }
   }
 
-  /**
-   * -------------------------------------------------------
-   * CAMERA OPTIMIZATION
-   * -------------------------------------------------------
-   */
   async function optimizeCamera(
     stream: MediaStream,
   ) {
@@ -246,9 +217,6 @@ export default function BarcodeScanner({
 
     trackRef.current = track;
 
-    /**
-     * Read actual camera resolution.
-     */
     try {
       const settings = track.getSettings();
 
@@ -261,25 +229,15 @@ export default function BarcodeScanner({
         );
       }
     } catch {
-      // Some browsers may not expose camera settings.
+      // Camera settings may not be available.
     }
 
-    /**
-     * Read camera capabilities.
-     *
-     * "any" is intentionally used because browser camera
-     * capabilities such as zoom and focusMode are not
-     * consistently represented by TypeScript.
-     */
     try {
       const capabilities =
         track.getCapabilities() as any;
 
       const advanced: any[] = [];
 
-      /**
-       * Continuous autofocus.
-       */
       if (
         Array.isArray(
           capabilities.focusMode,
@@ -293,9 +251,6 @@ export default function BarcodeScanner({
         });
       }
 
-      /**
-       * Camera zoom.
-       */
       if (
         capabilities.zoom &&
         typeof capabilities.zoom.min ===
@@ -324,9 +279,6 @@ export default function BarcodeScanner({
         }
       }
 
-      /**
-       * Apply optional camera improvements.
-       */
       if (advanced.length > 0) {
         try {
           await track.applyConstraints({
@@ -347,11 +299,6 @@ export default function BarcodeScanner({
     }
   }
 
-  /**
-   * -------------------------------------------------------
-   * CHANGE CAMERA ZOOM
-   * -------------------------------------------------------
-   */
   async function changeZoom(
     value: number,
   ) {
@@ -379,11 +326,6 @@ export default function BarcodeScanner({
     }
   }
 
-  /**
-   * -------------------------------------------------------
-   * START SCANNER
-   * -------------------------------------------------------
-   */
   async function startScanner() {
     setError("");
     setScannedBarcode("");
@@ -408,62 +350,33 @@ export default function BarcodeScanner({
       return;
     }
 
-    /**
-     * Make sure an old scanner is completely stopped.
-     */
     stopScanner();
 
     try {
-      /**
-       * ---------------------------------------------------
-       * STRONG ZXING HINTS
-       * ---------------------------------------------------
-       */
       const hints =
         new Map<DecodeHintType, any>();
 
       hints.set(
         DecodeHintType.POSSIBLE_FORMATS,
         [
-          /**
-           * QR
-           */
           BarcodeFormat.QR_CODE,
-
-          /**
-           * Common retail barcodes.
-           */
           BarcodeFormat.EAN_13,
           BarcodeFormat.EAN_8,
           BarcodeFormat.UPC_A,
           BarcodeFormat.UPC_E,
-
-          /**
-           * Inventory / industrial barcodes.
-           */
           BarcodeFormat.CODE_128,
           BarcodeFormat.CODE_39,
           BarcodeFormat.CODE_93,
           BarcodeFormat.ITF,
-
-          /**
-           * Other commonly encountered format.
-           */
           BarcodeFormat.CODABAR,
         ],
       );
 
-      /**
-       * Tell ZXing to make a stronger decoding attempt.
-       */
       hints.set(
         DecodeHintType.TRY_HARDER,
         true,
       );
 
-      /**
-       * Create ZXing reader.
-       */
       const reader =
         new BrowserMultiFormatReader(
           hints,
@@ -477,11 +390,6 @@ export default function BarcodeScanner({
         "Strong barcode scanner active...",
       );
 
-      /**
-       * ---------------------------------------------------
-       * HIGH-QUALITY CAMERA CONSTRAINTS
-       * ---------------------------------------------------
-       */
       const constraints:
         MediaStreamConstraints = {
         audio: false,
@@ -506,24 +414,15 @@ export default function BarcodeScanner({
         },
       };
 
-      /**
-       * Start decoding.
-       */
       const controls =
         await reader.decodeFromConstraints(
           constraints,
           videoRef.current,
           async (result) => {
-            /**
-             * No barcode detected yet.
-             */
             if (!result) {
               return;
             }
 
-            /**
-             * Prevent duplicate scans.
-             */
             if (lockedRef.current) {
               return;
             }
@@ -535,10 +434,6 @@ export default function BarcodeScanner({
               return;
             }
 
-            /**
-             * Lock immediately so the same barcode
-             * isn't detected multiple times.
-             */
             lockedRef.current = true;
 
             setScannedBarcode(value);
@@ -548,9 +443,6 @@ export default function BarcodeScanner({
               "Barcode detected successfully!",
             );
 
-            /**
-             * Stop ZXing.
-             */
             if (controlsRef.current) {
               try {
                 controlsRef.current.stop();
@@ -564,18 +456,12 @@ export default function BarcodeScanner({
               controlsRef.current = null;
             }
 
-            /**
-             * Send barcode to parent component.
-             */
             onScan(value);
           },
         );
 
       controlsRef.current = controls;
 
-      /**
-       * Get the MediaStream attached to the video.
-       */
       if (videoRef.current) {
         const stream =
           videoRef.current.srcObject;
@@ -629,15 +515,7 @@ export default function BarcodeScanner({
     }
   }
 
-  /**
-   * -------------------------------------------------------
-   * STOP SCANNER
-   * -------------------------------------------------------
-   */
   function stopScanner() {
-    /**
-     * Stop ZXing controls.
-     */
     if (controlsRef.current) {
       try {
         controlsRef.current.stop();
@@ -651,9 +529,6 @@ export default function BarcodeScanner({
       controlsRef.current = null;
     }
 
-    /**
-     * Stop stored MediaStream.
-     */
     if (streamRef.current) {
       streamRef.current
         .getTracks()
@@ -664,9 +539,6 @@ export default function BarcodeScanner({
       streamRef.current = null;
     }
 
-    /**
-     * Stop anything still attached to the video element.
-     */
     if (videoRef.current) {
       const stream =
         videoRef.current.srcObject;
@@ -692,11 +564,6 @@ export default function BarcodeScanner({
     setZoomSupported(false);
   }
 
-  /**
-   * -------------------------------------------------------
-   * CHANGE CAMERA
-   * -------------------------------------------------------
-   */
   function changeCamera(
     cameraId: string,
   ) {
@@ -715,11 +582,6 @@ export default function BarcodeScanner({
     );
   }
 
-  /**
-   * -------------------------------------------------------
-   * SCAN AGAIN
-   * -------------------------------------------------------
-   */
   function scanAgain() {
     setError("");
     setScannedBarcode("");
@@ -732,11 +594,6 @@ export default function BarcodeScanner({
     );
   }
 
-  /**
-   * -------------------------------------------------------
-   * REFRESH CAMERAS
-   * -------------------------------------------------------
-   */
   async function refreshCameras() {
     stopScanner();
 
@@ -747,11 +604,6 @@ export default function BarcodeScanner({
     await loadCameras();
   }
 
-  /**
-   * -------------------------------------------------------
-   * INITIAL LOAD
-   * -------------------------------------------------------
-   */
   useEffect(() => {
     loadCameras();
 
@@ -788,14 +640,8 @@ export default function BarcodeScanner({
     };
   }, []);
 
-  /**
-   * -------------------------------------------------------
-   * USER INTERFACE
-   * -------------------------------------------------------
-   */
   return (
     <div className="w-full rounded-xl bg-white p-5 shadow-sm">
-      {/* HEADER */}
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-gray-900">
@@ -821,7 +667,6 @@ export default function BarcodeScanner({
         )}
       </div>
 
-      {/* CAMERA SELECTOR */}
       <div className="mt-5">
         <label className="mb-2 block text-sm font-medium text-gray-700">
           Camera / Device
@@ -856,7 +701,6 @@ export default function BarcodeScanner({
         </select>
       </div>
 
-      {/* CAMERA VIEW */}
       <div className="relative mt-5 overflow-hidden rounded-xl bg-black">
         <video
           ref={videoRef}
@@ -866,29 +710,22 @@ export default function BarcodeScanner({
           className="block min-h-[360px] w-full object-cover"
         />
 
-        {/* STRONG SCANNING AREA */}
         {isScanning && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div className="relative h-48 w-[94%] rounded-xl border-2 border-white shadow-lg">
-              {/* RED SCAN LINE */}
               <div className="absolute left-0 right-0 top-1/2 h-0.5 bg-red-500 shadow-[0_0_8px_rgba(255,0,0,0.9)]" />
 
-              {/* TOP LEFT */}
               <div className="absolute left-0 top-0 h-8 w-8 border-l-4 border-t-4 border-white" />
 
-              {/* TOP RIGHT */}
               <div className="absolute right-0 top-0 h-8 w-8 border-r-4 border-t-4 border-white" />
 
-              {/* BOTTOM LEFT */}
               <div className="absolute bottom-0 left-0 h-8 w-8 border-b-4 border-l-4 border-white" />
 
-              {/* BOTTOM RIGHT */}
               <div className="absolute bottom-0 right-0 h-8 w-8 border-b-4 border-r-4 border-white" />
             </div>
           </div>
         )}
 
-        {/* STOPPED MESSAGE */}
         {!isScanning &&
           !scannedBarcode && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -899,7 +736,6 @@ export default function BarcodeScanner({
           )}
       </div>
 
-      {/* CAMERA INFORMATION */}
       <div className="mt-3 flex flex-wrap gap-2">
         {isScanning && (
           <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700">
@@ -920,7 +756,6 @@ export default function BarcodeScanner({
         )}
       </div>
 
-      {/* ZOOM CONTROL */}
       {isScanning &&
         zoomSupported && (
           <div className="mt-4 rounded-lg border border-gray-200 p-4">
@@ -952,7 +787,6 @@ export default function BarcodeScanner({
           </div>
         )}
 
-      {/* STATUS */}
       <div className="mt-4 rounded-lg bg-gray-50 p-3">
         <p className="text-sm font-medium text-gray-700">
           {status}
@@ -966,7 +800,6 @@ export default function BarcodeScanner({
         )}
       </div>
 
-      {/* ERROR */}
       {error && (
         <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           <p className="font-semibold">
@@ -979,7 +812,6 @@ export default function BarcodeScanner({
         </div>
       )}
 
-      {/* RESULT */}
       {scannedBarcode && (
         <div className="mt-4 rounded-lg border border-green-200 bg-green-50 p-4">
           <p className="text-sm font-semibold text-green-700">
@@ -992,7 +824,6 @@ export default function BarcodeScanner({
         </div>
       )}
 
-      {/* BUTTONS */}
       <div className="mt-5 flex flex-wrap gap-3">
         {!isScanning ? (
           <button
@@ -1038,41 +869,31 @@ export default function BarcodeScanner({
         </button>
       </div>
 
-      {/* INFORMATION */}
       <div className="mt-5 rounded-lg border border-gray-200 p-4">
         <p className="text-sm font-semibold text-gray-800">
           Powerful scanning mode
         </p>
 
         <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-gray-500">
-          <li>
-            QR codes remain supported.
-          </li>
-
+          <li>QR codes remain supported.</li>
           <li>
             Optimized for EAN-13, EAN-8, UPC-A and UPC-E.
           </li>
-
           <li>
             Supports Code 128, Code 39, Code 93 and ITF.
           </li>
-
           <li>
             Uses stronger ZXing decoding for difficult barcodes.
           </li>
-
           <li>
             Uses higher camera resolution when available.
           </li>
-
           <li>
             Uses continuous autofocus when supported by the camera.
           </li>
-
           <li>
             Supports switching between connected cameras.
           </li>
-
           <li>
             Supports camera zoom when the device provides it.
           </li>

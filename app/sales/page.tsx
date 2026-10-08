@@ -7,27 +7,101 @@ import {
   useState,
 } from "react";
 
-import BarcodeScanner from "../components/BarcodeScanner";
-import PermissionGuard from "../components/PermissionGuard";
+import BarcodeScanner from "@/app/components/BarcodeScanner";
+import PermissionGuard from "@/app/components/PermissionGuard";
 
 import {
-  adjustProductQuantity,
-  getProducts,
-  Product,
-  subscribeToProducts,
-} from "../lib/products";
+  hydrateCurrentUser,
+  type User,
+} from "@/app/lib/auth";
 
-import {
-  createSale,
-  getSalesByBusinessId,
-  type Sale,
-} from "../lib/sales";
+import { supabase } from "@/app/lib/supabase";
 
-import { getCurrentUser } from "../lib/auth";
+type PaymentMethod =
+  | "cash"
+  | "mobile_money"
+  | "card"
+  | "credit"
+  | "other";
 
-import {
-  getBusinessByOwnerUserId,
-} from "../lib/businesses";
+type Product = {
+  id: string;
+  name: string;
+  barcode: string;
+  category: string;
+  quantity: number;
+  unit: string;
+  buyingPrice: number;
+  sellingPrice: number;
+};
+
+type PackagingConfig = {
+  productId: string;
+  baseUnit: string;
+  factors: Record<string, number>;
+};
+
+type SaleItem = {
+  id: string;
+  saleId: string;
+  productName: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  buyingPrice: number;
+  totalPrice: number;
+};
+
+type Sale = {
+  id: string;
+  businessId: string;
+  userId: string | null;
+  totalAmount: number;
+  paymentMethod: PaymentMethod;
+  customerName: string | null;
+  createdAt: string;
+  items: SaleItem[];
+};
+
+type DatabaseProduct = {
+  id: string;
+  name: string;
+  barcode: string | null;
+  category: string | null;
+  quantity: number | string;
+  unit: string;
+  buying_price: number | string;
+  selling_price: number | string;
+};
+
+type DatabasePackagingConfig = {
+  product_id: string;
+  base_unit: string;
+  factors: unknown;
+};
+
+type DatabaseSale = {
+  id: string;
+  business_id: string;
+  user_id: string | null;
+  total_amount: number | string;
+  payment_method: PaymentMethod;
+  customer_name: string | null;
+  created_at: string;
+};
+
+type DatabaseSaleItem = {
+  id: string;
+  sale_id: string;
+  product_id: string | null;
+  product_name: string;
+  quantity: number | string;
+  unit: string;
+  unit_price: number | string;
+  buying_price: number | string;
+  total_price: number | string;
+  created_at: string;
+};
 
 function formatRwf(value: number) {
   return new Intl.NumberFormat("en-RW").format(
@@ -35,24 +109,261 @@ function formatRwf(value: number) {
   );
 }
 
+function mapProduct(
+  row: DatabaseProduct,
+): Product {
+  return {
+    id: row.id,
+    name: row.name,
+    barcode: row.barcode ?? "",
+    category: row.category ?? "",
+    quantity: Number(row.quantity),
+    unit: row.unit,
+    buyingPrice: Number(
+      row.buying_price,
+    ),
+    sellingPrice: Number(
+      row.selling_price,
+    ),
+  };
+}
+
+function mapSale(
+  row: DatabaseSale,
+  items: DatabaseSaleItem[],
+): Sale {
+  return {
+    id: row.id,
+    businessId: row.business_id,
+    userId: row.user_id,
+    totalAmount: Number(
+      row.total_amount,
+    ),
+    paymentMethod:
+      row.payment_method,
+    customerName:
+      row.customer_name,
+    createdAt:
+      row.created_at,
+    items: items.map((item) => ({
+      id: item.id,
+      saleId: item.sale_id,
+      productName:
+        item.product_name,
+      quantity: Number(
+        item.quantity,
+      ),
+      unit: item.unit,
+      unitPrice: Number(
+        item.unit_price,
+      ),
+      buyingPrice: Number(
+        item.buying_price,
+      ),
+      totalPrice: Number(
+        item.total_price,
+      ),
+    })),
+  };
+}
+
+function paymentLabel(
+  method: PaymentMethod,
+) {
+  switch (method) {
+    case "mobile_money":
+      return "Mobile Money";
+
+    case "cash":
+      return "Cash";
+
+    case "card":
+      return "Card";
+
+    case "credit":
+      return "Credit";
+
+    default:
+      return "Other";
+  }
+}
+
+const paymentMethods: {
+  value: PaymentMethod;
+  label: string;
+}[] = [
+  {
+    value: "cash",
+    label: "Cash",
+  },
+  {
+    value: "mobile_money",
+    label: "Mobile Money",
+  },
+  {
+    value: "card",
+    label: "Card",
+  },
+  {
+    value: "credit",
+    label: "Credit",
+  },
+  {
+    value: "other",
+    label: "Other",
+  },
+];
+
+function normalizePackagingFactors(
+  value: unknown,
+): Record<string, number> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return {};
+  }
+
+  const result: Record<
+    string,
+    number
+  > = {};
+
+  for (const [
+    key,
+    rawValue,
+  ] of Object.entries(
+    value as Record<
+      string,
+      unknown
+    >,
+  )) {
+    const numericValue =
+      Number(rawValue);
+
+    if (
+      Number.isFinite(
+        numericValue,
+      ) &&
+      numericValue > 0
+    ) {
+      result[key] =
+        numericValue;
+    }
+  }
+
+  return result;
+}
+
+function mapPackagingConfig(
+  row: DatabasePackagingConfig,
+): PackagingConfig {
+  return {
+    productId:
+      row.product_id,
+    baseUnit:
+      row.base_unit,
+    factors:
+      normalizePackagingFactors(
+        row.factors,
+      ),
+  };
+}
+
+function formatQuantity(
+  value: number,
+) {
+  if (Number.isInteger(value)) {
+    return value.toString();
+  }
+
+  return value
+    .toFixed(3)
+    .replace(/0+$/, "")
+    .replace(/\.$/, "");
+}
+
+function unitAllowsFraction(
+  unit: string,
+) {
+  return (
+    unit === "Kg" ||
+    unit === "Litre"
+  );
+}
+
 function SalesContent() {
+  const [user, setUser] =
+    useState<User | null>(null);
+
   const [products, setProducts] =
     useState<Product[]>([]);
+
+  const [
+    packagingConfigs,
+    setPackagingConfigs,
+  ] = useState<
+    Record<
+      string,
+      PackagingConfig
+    >
+  >({});
 
   const [sales, setSales] =
     useState<Sale[]>([]);
 
-  const [selectedProductId, setSelectedProductId] =
+  const [
+    businessName,
+    setBusinessName,
+  ] = useState("");
+
+  const [businessId, setBusinessId] =
     useState("");
+
+  const [
+    businessStatus,
+    setBusinessStatus,
+  ] = useState("");
+
+  const [
+    selectedProductId,
+    setSelectedProductId,
+  ] = useState("");
+
+  const [
+    selectedUnit,
+    setSelectedUnit,
+  ] = useState("");
 
   const [quantity, setQuantity] =
     useState("");
 
+  const [
+    customerName,
+    setCustomerName,
+  ] = useState("");
+
+  const [
+    paymentMethod,
+    setPaymentMethod,
+  ] = useState<PaymentMethod>("cash");
+
   const [search, setSearch] =
     useState("");
 
-  const [scannerOpen, setScannerOpen] =
-    useState(false);
+  const [
+    scannerOpen,
+    setScannerOpen,
+  ] = useState(false);
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [
+    submitting,
+    setSubmitting,
+  ] = useState(false);
 
   const [error, setError] =
     useState("");
@@ -60,66 +371,231 @@ function SalesContent() {
   const [success, setSuccess] =
     useState("");
 
-  function refreshData() {
-    const savedProducts =
-      getProducts();
+  async function loadData() {
+    setError("");
 
-    setProducts(savedProducts);
+    try {
+      const currentUser =
+        await hydrateCurrentUser();
 
-    const currentUser =
-      getCurrentUser();
+      if (!currentUser) {
+        setLoading(false);
+        return;
+      }
 
-    if (!currentUser) {
-      setSales([]);
-      return;
-    }
+      if (!currentUser.businessId) {
+        setError(
+          "Your account is not connected to a business.",
+        );
+        setLoading(false);
+        return;
+      }
 
-    const business =
-      getBusinessByOwnerUserId(
-        currentUser.id,
+      setUser(currentUser);
+      setBusinessId(
+        currentUser.businessId,
       );
 
-    if (!business) {
-      setSales([]);
-      return;
-    }
+      const {
+        data: business,
+        error: businessError,
+      } = await supabase
+        .from("businesses")
+        .select(
+          "id, name, status",
+        )
+        .eq(
+          "id",
+          currentUser.businessId,
+        )
+        .maybeSingle();
 
-    setSales(
-      getSalesByBusinessId(
-        business.id,
-      ),
-    );
-
-    setSelectedProductId(
-      (currentId) => {
-        if (
-          currentId &&
-          savedProducts.some(
-            (product) =>
-              product.id === currentId,
-          )
-        ) {
-          return currentId;
-        }
-
-        return (
-          savedProducts[0]?.id ?? ""
+      if (businessError) {
+        throw new Error(
+          businessError.message,
         );
-      },
-    );
+      }
+
+      if (!business) {
+        throw new Error(
+          "Your business could not be found.",
+        );
+      }
+
+      setBusinessName(
+        business.name,
+      );
+
+      setBusinessStatus(
+        business.status,
+      );
+
+      const {
+        data: productRows,
+        error: productError,
+      } = await supabase
+        .from("products")
+        .select(
+          "id, name, barcode, category, quantity, unit, buying_price, selling_price",
+        )
+        .eq(
+          "business_id",
+          currentUser.businessId,
+        )
+        .order("name", {
+          ascending: true,
+        });
+
+      if (productError) {
+        throw new Error(
+          productError.message,
+        );
+      }
+
+      const mappedProducts = (
+        productRows ?? []
+      ).map((row) =>
+        mapProduct(
+          row as DatabaseProduct,
+        ),
+      );
+
+      setProducts(
+        mappedProducts,
+      );
+
+      /*
+       * Load the new packaging
+       * configuration for this
+       * business.
+       */
+      const {
+        data: packagingRows,
+        error: packagingError,
+      } = await supabase
+        .from("packaging_configs")
+        .select(
+          "product_id, base_unit, factors",
+        )
+        .eq(
+          "business_id",
+          currentUser.businessId,
+        );
+
+      if (packagingError) {
+        throw new Error(
+          packagingError.message,
+        );
+      }
+
+      const packagingMap: Record<
+        string,
+        PackagingConfig
+      > = {};
+
+      (
+        packagingRows ?? []
+      ).forEach((row) => {
+        const config =
+          mapPackagingConfig(
+            row as DatabasePackagingConfig,
+          );
+
+        packagingMap[
+          config.productId
+        ] = config;
+      });
+
+      setPackagingConfigs(
+        packagingMap,
+      );
+
+      const {
+        data: saleRows,
+        error: saleError,
+      } = await supabase
+        .from("sales")
+        .select(
+          "id, business_id, user_id, total_amount, payment_method, customer_name, created_at",
+        )
+        .eq(
+          "business_id",
+          currentUser.businessId,
+        )
+        .order(
+          "created_at",
+          {
+            ascending: false,
+          },
+        );
+
+      if (saleError) {
+        throw new Error(
+          saleError.message,
+        );
+      }
+
+      const typedSales =
+        (saleRows ?? []) as DatabaseSale[];
+
+      if (typedSales.length === 0) {
+        setSales([]);
+        setLoading(false);
+        return;
+      }
+
+      const saleIds =
+        typedSales.map(
+          (sale) => sale.id,
+        );
+
+      const {
+        data: itemRows,
+        error: itemError,
+      } = await supabase
+        .from("sale_items")
+        .select(
+          "id, sale_id, product_id, product_name, quantity, unit, unit_price, buying_price, total_price, created_at",
+        )
+        .in(
+          "sale_id",
+          saleIds,
+        );
+
+      if (itemError) {
+        throw new Error(
+          itemError.message,
+        );
+      }
+
+      const typedItems =
+        (itemRows ?? []) as DatabaseSaleItem[];
+
+      setSales(
+        typedSales.map((sale) =>
+          mapSale(
+            sale,
+            typedItems.filter(
+              (item) =>
+                item.sale_id ===
+                sale.id,
+            ),
+          ),
+        ),
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load sales data.",
+      );
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
-    refreshData();
-
-    const unsubscribeProducts =
-      subscribeToProducts(
-        refreshData,
-      );
-
-    return () => {
-      unsubscribeProducts();
-    };
+    void loadData();
   }, []);
 
   const selectedProduct =
@@ -129,14 +605,153 @@ function SalesContent() {
         selectedProductId,
     );
 
+  const selectedPackaging =
+    selectedProduct
+      ? packagingConfigs[
+          selectedProduct.id
+        ]
+      : undefined;
+
+  /*
+   * Build the units that can be sold.
+   *
+   * The base unit is always available.
+   *
+   * Additional units come from the
+   * packaging_configs factors.
+   */
+  const saleUnits = useMemo(() => {
+    if (!selectedProduct) {
+      return [];
+    }
+
+    const units: {
+      unit: string;
+      factor: number;
+    }[] = [
+      {
+        unit:
+          selectedProduct.unit,
+        factor: 1,
+      },
+    ];
+
+    if (
+      selectedPackaging &&
+      selectedPackaging.baseUnit ===
+        selectedProduct.unit
+    ) {
+      for (const [
+        unit,
+        factor,
+      ] of Object.entries(
+        selectedPackaging.factors,
+      )) {
+        if (
+          unit ===
+          selectedProduct.unit
+        ) {
+          continue;
+        }
+
+        if (
+          !Number.isFinite(
+            factor,
+          ) ||
+          factor <= 0
+        ) {
+          continue;
+        }
+
+        units.push({
+          unit,
+          factor,
+        });
+      }
+    }
+
+    return units;
+  }, [
+    selectedProduct,
+    selectedPackaging,
+  ]);
+
+  /*
+   * Find the conversion factor
+   * for the currently selected
+   * sale unit.
+   */
+  const selectedConversion =
+    useMemo(() => {
+      if (!selectedProduct) {
+        return 1;
+      }
+
+      if (
+        selectedUnit ===
+        selectedProduct.unit
+      ) {
+        return 1;
+      }
+
+      if (
+        !selectedPackaging ||
+        selectedPackaging.baseUnit !==
+          selectedProduct.unit
+      ) {
+        return 1;
+      }
+
+      const factor =
+        selectedPackaging.factors[
+          selectedUnit
+        ];
+
+      return Number.isFinite(
+        factor,
+      ) && factor > 0
+        ? factor
+        : 1;
+    }, [
+      selectedProduct,
+      selectedUnit,
+      selectedPackaging,
+    ]);
+
+  /*
+   * Stock is stored in the
+   * product's base unit.
+   *
+   * Convert it to the selected
+   * sale unit for display.
+   */
+  const availableSaleQuantity =
+    selectedProduct
+      ? selectedProduct.quantity /
+        selectedConversion
+      : 0;
+
+  /*
+   * Selling price is stored for
+   * the base unit.
+   *
+   * A package price is therefore:
+   *
+   * base selling price ×
+   * package factor
+   */
+  const selectedUnitPrice =
+    selectedProduct
+      ? selectedProduct.sellingPrice *
+        selectedConversion
+      : 0;
+
   const filteredProducts =
     useMemo(() => {
-      const searchText =
-        search
-          .trim()
-          .toLowerCase();
+      const text =
+        search.trim().toLowerCase();
 
-      if (!searchText) {
+      if (!text) {
         return products;
       }
 
@@ -144,13 +759,13 @@ function SalesContent() {
         (product) =>
           product.name
             .toLowerCase()
-            .includes(searchText) ||
+            .includes(text) ||
           product.barcode
             .toLowerCase()
-            .includes(searchText) ||
+            .includes(text) ||
           product.category
             .toLowerCase()
-            .includes(searchText),
+            .includes(text),
       );
     }, [products, search]);
 
@@ -164,85 +779,79 @@ function SalesContent() {
     ) &&
     enteredQuantity > 0
       ? enteredQuantity *
-        selectedProduct.sellingPrice
+        selectedUnitPrice
       : 0;
 
+  function selectProduct(
+    product: Product,
+  ) {
+    setSelectedProductId(
+      product.id,
+    );
+
+    /*
+     * Always start a newly selected
+     * product at its base unit.
+     */
+    setSelectedUnit(
+      product.unit,
+    );
+
+    setQuantity("");
+    setError("");
+    setSuccess("");
+  }
+
   function handleBarcodeScan(
-    scannedBarcode: string,
+    barcode: string,
   ) {
     const cleanBarcode =
-      String(
-        scannedBarcode ?? "",
-      ).trim();
+      barcode.trim();
 
     if (!cleanBarcode) {
       setError(
-        "The scanner did not return a valid barcode. Please try scanning again.",
+        "The scanner did not return a valid barcode.",
       );
-
-      setSuccess("");
       setScannerOpen(false);
-
       return;
     }
 
-    const foundProduct =
+    const product =
       products.find(
-        (product) => {
-          const productBarcode =
-            String(
-              product.barcode ?? "",
-            ).trim();
-
-          return (
-            productBarcode.length > 0 &&
-            productBarcode ===
-              cleanBarcode
-          );
-        },
+        (item) =>
+          item.barcode.trim() ===
+          cleanBarcode,
       );
 
-    if (!foundProduct) {
+    if (!product) {
       setError(
-        `No product was found with barcode ${cleanBarcode}. Please add this barcode to a product first.`,
+        `No product was found with barcode ${cleanBarcode}.`,
       );
-
-      setSuccess("");
       setScannerOpen(false);
-
       return;
     }
 
     setSelectedProductId(
-      foundProduct.id,
+      product.id,
     );
 
-    setSearch(
-      foundProduct.name,
+    setSelectedUnit(
+      product.unit,
     );
 
-    setQuantity("");
+    setQuantity("1");
+    setSearch(product.name);
 
     setError("");
 
     setSuccess(
-      `${foundProduct.name} found and selected automatically.`,
+      `${product.name} selected automatically.`,
     );
 
     setScannerOpen(false);
   }
 
-  function openBarcodeScanner() {
-    setError("");
-    setSuccess("");
-    setScannerOpen(true);
-  }
-
-  function closeBarcodeScanner() {
-    setScannerOpen(false);
-  }
-
-  function handleSubmit(
+  async function handleSubmit(
     event: FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
@@ -250,11 +859,41 @@ function SalesContent() {
     setError("");
     setSuccess("");
 
+    if (!user) {
+      setError(
+        "You are not logged in.",
+      );
+      return;
+    }
+
+    if (!businessId) {
+      setError(
+        "Your account is not connected to a business.",
+      );
+      return;
+    }
+
+    if (
+      businessStatus !==
+      "active"
+    ) {
+      setError(
+        "Your business is not active. You cannot record sales yet.",
+      );
+      return;
+    }
+
     if (!selectedProduct) {
       setError(
         "Please select a product.",
       );
+      return;
+    }
 
+    if (!selectedUnit) {
+      setError(
+        "Please select a sale unit.",
+      );
       return;
     }
 
@@ -267,120 +906,149 @@ function SalesContent() {
       setError(
         "Enter a valid quantity greater than zero.",
       );
+      return;
+    }
 
+    /*
+     * Piece, Box and Pack are
+     * normally sold as whole units.
+     *
+     * Kg and Litre can be sold
+     * fractionally.
+     */
+    if (
+      !unitAllowsFraction(
+        selectedUnit,
+      ) &&
+      !Number.isInteger(
+        enteredQuantity,
+      )
+    ) {
+      setError(
+        `${selectedUnit} must be sold as a whole number.`,
+      );
       return;
     }
 
     if (
       enteredQuantity >
-      selectedProduct.quantity
+      availableSaleQuantity
     ) {
       setError(
-        `Not enough stock. ${selectedProduct.name} currently has ${selectedProduct.quantity} ${selectedProduct.unit} available.`,
+        `Insufficient stock. Available: ${formatQuantity(
+          availableSaleQuantity,
+        )} ${selectedUnit}.`,
       );
-
       return;
     }
 
-    const currentUser =
-      getCurrentUser();
+    /*
+     * Verify that the selected unit
+     * is actually configured for
+     * this product.
+     */
+    const validUnit =
+      saleUnits.some(
+        (item) =>
+          item.unit ===
+          selectedUnit,
+      );
 
-    if (!currentUser) {
+    if (!validUnit) {
       setError(
-        "You are not logged in.",
+        `${selectedUnit} is not configured for this product.`,
       );
-
       return;
     }
 
-    const business =
-      getBusinessByOwnerUserId(
-        currentUser.id,
-      );
-
-    if (!business) {
-      setError(
-        "Your account is not connected to a business.",
-      );
-
-      return;
-    }
-
-    if (
-      business.status !==
-      "active"
-    ) {
-      setError(
-        "Your business is not active. You cannot record sales yet.",
-      );
-
-      return;
-    }
-
-    const saleItem = {
-      productId:
-        selectedProduct.id,
-
-      productName:
-        selectedProduct.name,
-
-      quantity:
-        enteredQuantity,
-
-      unit:
-        selectedProduct.unit,
-
-      unitPrice:
-        selectedProduct.sellingPrice,
-
-      total:
-        enteredQuantity *
-        selectedProduct.sellingPrice,
-    };
+    setSubmitting(true);
 
     try {
-      const sale =
-        createSale({
-          businessId:
-            business.id,
+      const {
+        data: sale,
+        error: saleError,
+      } = await supabase.rpc(
+        "record_sale",
+        {
+          p_business_id:
+            businessId,
 
-          items: [saleItem],
-        });
+          p_payment_method:
+            paymentMethod,
 
-      if (!sale) {
-        setError(
-          "The sale could not be recorded.",
+          p_customer_name:
+            customerName.trim() ||
+            null,
+
+          p_items: [
+            {
+              product_id:
+                selectedProduct.id,
+
+              quantity:
+                enteredQuantity,
+
+              unit:
+                selectedUnit,
+
+              unit_price:
+                selectedUnitPrice,
+            },
+          ],
+        },
+      );
+
+      if (saleError) {
+        throw new Error(
+          saleError.message ||
+            "The sale could not be recorded.",
         );
-
-        return;
       }
 
-      adjustProductQuantity(
-        selectedProduct.id,
-        -enteredQuantity,
-      );
+      if (!sale) {
+        throw new Error(
+          "The sale was not returned by Supabase.",
+        );
+      }
+
+      const soldUnit =
+        selectedUnit;
+
+      const soldQuantity =
+        enteredQuantity;
+
+      const soldProductName =
+        selectedProduct.name;
 
       setQuantity("");
+      setCustomerName("");
 
       setSuccess(
-        `Sale recorded successfully. ${enteredQuantity} ${selectedProduct.unit} of ${selectedProduct.name} sold for ${formatRwf(sale.total)} RWF.`,
+        `Sale recorded successfully. ${formatQuantity(
+          soldQuantity,
+        )} ${soldUnit} of ${soldProductName} sold for ${formatRwf(
+          Number(
+            sale.total_amount,
+          ),
+        )} RWF.`,
       );
 
-      refreshData();
-    } catch (submissionError) {
+      await loadData();
+    } catch (err) {
       setError(
-        submissionError instanceof
-          Error
-          ? submissionError.message
-          : "Something went wrong while recording the sale.",
+        err instanceof Error
+          ? err.message
+          : "Unable to record the sale.",
       );
+    } finally {
+      setSubmitting(false);
     }
   }
 
   const totalSalesValue =
     sales.reduce(
       (sum, sale) =>
-        sum + sale.total,
+        sum + sale.totalAmount,
       0,
     );
 
@@ -406,13 +1074,24 @@ function SalesContent() {
       })
       .reduce(
         (sum, sale) =>
-          sum + sale.total,
+          sum +
+          sale.totalAmount,
         0,
       );
 
+  if (loading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-gray-100">
+        <p className="text-gray-600">
+          Loading sales...
+        </p>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-gray-100 p-6">
-      <div className="mx-auto max-w-6xl">
+      <div className="mx-auto max-w-7xl">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h1 className="text-3xl font-bold text-gray-900">
@@ -420,41 +1099,53 @@ function SalesContent() {
             </h1>
 
             <p className="mt-2 text-gray-600">
-              Record sales and automatically
-              reduce inventory.
+              {businessName ||
+                "Record and manage business sales."}
             </p>
           </div>
 
           <div className="flex flex-wrap gap-3">
             <a
               href="/"
-              className="rounded-lg border border-gray-300 bg-white px-5 py-3 text-center font-medium text-gray-900 hover:bg-gray-50"
+              className="rounded-lg border border-gray-300 bg-white px-5 py-3 font-medium text-gray-900"
             >
               Dashboard
             </a>
 
             <a
               href="/sales/new"
-              className="rounded-lg bg-black px-5 py-3 text-center font-medium text-white hover:bg-gray-800"
+              className="rounded-lg bg-black px-5 py-3 font-medium text-white"
             >
               New Sale
             </a>
 
             <a
               href="/products"
-              className="rounded-lg bg-white px-5 py-3 text-center font-medium text-gray-900 shadow hover:bg-gray-50"
+              className="rounded-lg bg-white px-5 py-3 font-medium text-gray-900 shadow"
             >
               Products
             </a>
 
             <a
               href="/stock"
-              className="rounded-lg bg-white px-5 py-3 text-center font-medium text-gray-900 shadow hover:bg-gray-50"
+              className="rounded-lg bg-white px-5 py-3 font-medium text-gray-900 shadow"
             >
               Stock
             </a>
           </div>
         </div>
+
+        {error && (
+          <div className="mt-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {error}
+          </div>
+        )}
+
+        {success && (
+          <div className="mt-6 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700">
+            {success}
+          </div>
+        )}
 
         <div className="mt-8 grid gap-4 md:grid-cols-3">
           <div className="rounded-xl bg-white p-6 shadow">
@@ -462,7 +1153,7 @@ function SalesContent() {
               Today&apos;s Sales
             </p>
 
-            <p className="mt-2 text-3xl font-bold text-gray-900">
+            <p className="mt-2 text-3xl font-bold">
               {formatRwf(
                 todaySalesValue,
               )}{" "}
@@ -475,7 +1166,7 @@ function SalesContent() {
               Total Sales
             </p>
 
-            <p className="mt-2 text-3xl font-bold text-gray-900">
+            <p className="mt-2 text-3xl font-bold">
               {formatRwf(
                 totalSalesValue,
               )}{" "}
@@ -488,7 +1179,7 @@ function SalesContent() {
               Transactions
             </p>
 
-            <p className="mt-2 text-3xl font-bold text-gray-900">
+            <p className="mt-2 text-3xl font-bold">
               {sales.length}
             </p>
           </div>
@@ -507,17 +1198,18 @@ function SalesContent() {
               </p>
             </div>
 
-            {!scannerOpen && (
-              <button
-                type="button"
-                onClick={
-                  openBarcodeScanner
-                }
-                className="rounded-lg bg-black px-5 py-3 font-medium text-white hover:bg-gray-800"
-              >
-                Scan Barcode
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                setError("");
+                setSuccess("");
+                setScannerOpen(true);
+              }}
+              disabled={scannerOpen}
+              className="rounded-lg bg-black px-5 py-3 font-medium text-white disabled:opacity-50"
+            >
+              Scan Barcode
+            </button>
           </div>
 
           {scannerOpen && (
@@ -526,8 +1218,10 @@ function SalesContent() {
                 onScan={
                   handleBarcodeScan
                 }
-                onClose={
-                  closeBarcodeScanner
+                onClose={() =>
+                  setScannerOpen(
+                    false,
+                  )
                 }
               />
             </div>
@@ -535,18 +1229,15 @@ function SalesContent() {
         </div>
 
         <div className="mt-8 grid gap-6 lg:grid-cols-3">
-          <div className="rounded-xl bg-white p-6 shadow lg:col-span-1">
+          <div className="rounded-xl bg-white p-6 shadow">
             <h2 className="text-xl font-semibold text-gray-900">
               Record Sale
             </h2>
 
-            <p className="mt-1 text-sm text-gray-500">
-              Choose a product and enter
-              the quantity sold.
-            </p>
-
             <form
-              onSubmit={handleSubmit}
+              onSubmit={
+                handleSubmit
+              }
               className="mt-6 space-y-4"
             >
               <div>
@@ -559,22 +1250,35 @@ function SalesContent() {
                     selectedProductId
                   }
                   onChange={(event) => {
-                    setSelectedProductId(
-                      event.target.value,
-                    );
+                    const product =
+                      products.find(
+                        (item) =>
+                          item.id ===
+                          event.target
+                            .value,
+                      );
 
-                    setQuantity("");
-
-                    setError("");
-                    setSuccess("");
+                    if (product) {
+                      selectProduct(
+                        product,
+                      );
+                    } else {
+                      setSelectedProductId(
+                        "",
+                      );
+                      setSelectedUnit(
+                        "",
+                      );
+                      setQuantity("");
+                    }
                   }}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-3 outline-none focus:border-black"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-3"
                 >
                   <option value="">
                     Select a product
                   </option>
 
-                  {products.map(
+                  {filteredProducts.map(
                     (product) => (
                       <option
                         key={
@@ -598,43 +1302,119 @@ function SalesContent() {
               </div>
 
               {selectedProduct && (
-                <div className="rounded-lg bg-gray-100 p-4">
-                  <p className="text-sm text-gray-500">
-                    Current stock
-                  </p>
+                <>
+                  <div className="rounded-lg bg-gray-100 p-4">
+                    <p className="text-sm text-gray-500">
+                      Current stock
+                    </p>
 
-                  <p className="mt-1 text-2xl font-bold text-gray-900">
-                    {
-                      selectedProduct.quantity
-                    }{" "}
-                    {
-                      selectedProduct.unit
-                    }
-                  </p>
+                    <p className="mt-1 text-2xl font-bold">
+                      {formatQuantity(
+                        selectedProduct.quantity,
+                      )}{" "}
+                      {
+                        selectedProduct.unit
+                      }
+                    </p>
 
-                  <p className="mt-3 text-sm text-gray-500">
-                    Barcode
-                  </p>
+                    {selectedConversion !==
+                      1 && (
+                      <p className="mt-2 text-sm text-gray-500">
+                        Available for sale:{" "}
+                        <span className="font-semibold text-gray-700">
+                          {formatQuantity(
+                            availableSaleQuantity,
+                          )}{" "}
+                          {
+                            selectedUnit
+                          }
+                        </span>
+                      </p>
+                    )}
 
-                  <p className="mt-1 break-all text-sm font-semibold text-gray-900">
-                    {selectedProduct.barcode ||
-                      "No barcode"}
-                  </p>
+                    <p className="mt-3 text-sm text-gray-500">
+                      Base selling price
+                    </p>
 
-                  <p className="mt-3 text-sm text-gray-500">
-                    Selling price
-                  </p>
+                    <p className="mt-1 text-lg font-semibold">
+                      {formatRwf(
+                        selectedProduct.sellingPrice,
+                      )}{" "}
+                      RWF /{" "}
+                      {
+                        selectedProduct.unit
+                      }
+                    </p>
+                  </div>
 
-                  <p className="mt-1 text-lg font-semibold text-gray-900">
-                    {formatRwf(
-                      selectedProduct.sellingPrice,
-                    )}{" "}
-                    RWF /{" "}
-                    {
-                      selectedProduct.unit
-                    }
-                  </p>
-                </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-medium text-gray-700">
+                      Sale Unit
+                    </label>
+
+                    <select
+                      value={
+                        selectedUnit
+                      }
+                      onChange={(
+                        event,
+                      ) => {
+                        setSelectedUnit(
+                          event.target
+                            .value,
+                        );
+                        setQuantity("");
+                        setError("");
+                        setSuccess("");
+                      }}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-3"
+                    >
+                      {saleUnits.map(
+                        ({
+                          unit,
+                          factor,
+                        }) => (
+                          <option
+                            key={
+                              unit
+                            }
+                            value={
+                              unit
+                            }
+                          >
+                            {unit}
+                            {factor !==
+                              1
+                              ? ` — 1 ${unit} = ${formatQuantity(
+                                  factor,
+                                )} ${
+                                  selectedProduct.unit
+                                }`
+                              : ""}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 bg-white p-4">
+                    <div className="flex justify-between gap-4">
+                      <span className="text-sm text-gray-500">
+                        Selling price
+                      </span>
+
+                      <span className="font-semibold">
+                        {formatRwf(
+                          selectedUnitPrice,
+                        )}{" "}
+                        RWF /{" "}
+                        {
+                          selectedUnit
+                        }
+                      </span>
+                    </div>
+                  </div>
+                </>
               )}
 
               <div>
@@ -645,25 +1425,102 @@ function SalesContent() {
                 <input
                   type="number"
                   min="0"
-                  step="any"
+                  step={
+                    selectedUnit &&
+                    unitAllowsFraction(
+                      selectedUnit,
+                    )
+                      ? "any"
+                      : "1"
+                  }
                   value={quantity}
                   onChange={(event) =>
                     setQuantity(
-                      event.target.value,
+                      event.target
+                        .value,
                     )
                   }
-                  placeholder="Example: 2"
-                  className="w-full rounded-lg border border-gray-300 px-3 py-3 outline-none focus:border-black"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-3"
+                />
+
+                {selectedProduct &&
+                  selectedUnit && (
+                    <p className="mt-2 text-xs text-gray-500">
+                      Available:{" "}
+                      {formatQuantity(
+                        availableSaleQuantity,
+                      )}{" "}
+                      {
+                        selectedUnit
+                      }
+                    </p>
+                  )}
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">
+                  Customer Name
+                </label>
+
+                <input
+                  type="text"
+                  value={
+                    customerName
+                  }
+                  onChange={(event) =>
+                    setCustomerName(
+                      event.target
+                        .value,
+                    )
+                  }
+                  placeholder="Optional"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-3"
                 />
               </div>
 
-              <div className="rounded-lg border border-gray-200 bg-white p-4">
-                <div className="flex items-center justify-between">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">
+                  Payment Method
+                </label>
+
+                <select
+                  value={
+                    paymentMethod
+                  }
+                  onChange={(event) =>
+                    setPaymentMethod(
+                      event.target
+                        .value as PaymentMethod,
+                    )
+                  }
+                  className="w-full rounded-lg border border-gray-300 px-3 py-3"
+                >
+                  {paymentMethods.map(
+                    (method) => (
+                      <option
+                        key={
+                          method.value
+                        }
+                        value={
+                          method.value
+                        }
+                      >
+                        {
+                          method.label
+                        }
+                      </option>
+                    ),
+                  )}
+                </select>
+              </div>
+
+              <div className="rounded-lg border bg-gray-50 p-4">
+                <div className="flex justify-between">
                   <span className="text-sm text-gray-500">
                     Sale Total
                   </span>
 
-                  <span className="text-xl font-bold text-gray-900">
+                  <span className="text-xl font-bold">
                     {formatRwf(
                       saleTotal,
                     )}{" "}
@@ -672,23 +1529,16 @@ function SalesContent() {
                 </div>
               </div>
 
-              {error && (
-                <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-                  {error}
-                </div>
-              )}
-
-              {success && (
-                <div className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
-                  {success}
-                </div>
-              )}
-
               <button
                 type="submit"
-                className="w-full rounded-lg bg-black px-5 py-3 font-medium text-white hover:bg-gray-800"
+                disabled={
+                  submitting
+                }
+                className="w-full rounded-lg bg-black px-5 py-3 font-medium text-white disabled:cursor-not-allowed disabled:bg-gray-300"
               >
-                Record Sale
+                {submitting
+                  ? "Recording Sale..."
+                  : "Record Sale"}
               </button>
             </form>
           </div>
@@ -696,13 +1546,13 @@ function SalesContent() {
           <div className="rounded-xl bg-white p-6 shadow lg:col-span-2">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
               <div>
-                <h2 className="text-xl font-semibold text-gray-900">
+                <h2 className="text-xl font-semibold">
                   Products Available for Sale
                 </h2>
 
                 <p className="mt-1 text-sm text-gray-500">
-                  Search your inventory before
-                  making a sale.
+                  Products are loaded directly
+                  from Supabase.
                 </p>
               </div>
 
@@ -715,7 +1565,7 @@ function SalesContent() {
                   )
                 }
                 placeholder="Search products..."
-                className="rounded-lg border border-gray-300 px-3 py-3 outline-none focus:border-black"
+                className="rounded-lg border border-gray-300 px-3 py-3"
               />
             </div>
 
@@ -752,9 +1602,9 @@ function SalesContent() {
                         key={
                           product.id
                         }
-                        className="border-b last:border-b-0"
+                        className="border-b"
                       >
-                        <td className="px-3 py-4 font-medium text-gray-900">
+                        <td className="px-3 py-4 font-medium">
                           {
                             product.name
                           }
@@ -762,20 +1612,21 @@ function SalesContent() {
 
                         <td className="px-3 py-4 text-gray-600">
                           {
-                            product.category
+                            product.category ||
+                            "—"
                           }
                         </td>
 
-                        <td className="px-3 py-4 text-gray-900">
-                          {
-                            product.quantity
-                          }{" "}
+                        <td className="px-3 py-4">
+                          {formatQuantity(
+                            product.quantity,
+                          )}{" "}
                           {
                             product.unit
                           }
                         </td>
 
-                        <td className="px-3 py-4 text-gray-900">
+                        <td className="px-3 py-4">
                           {formatRwf(
                             product.sellingPrice,
                           )}{" "}
@@ -785,17 +1636,12 @@ function SalesContent() {
                         <td className="px-3 py-4">
                           <button
                             type="button"
-                            onClick={() => {
-                              setSelectedProductId(
-                                product.id,
-                              );
-
-                              setQuantity("");
-
-                              setError("");
-                              setSuccess("");
-                            }}
-                            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium hover:bg-gray-50"
+                            onClick={() =>
+                              selectProduct(
+                                product,
+                              )
+                            }
+                            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium"
                           >
                             Select
                           </button>
@@ -822,25 +1668,21 @@ function SalesContent() {
         </div>
 
         <div className="mt-8 rounded-xl bg-white p-6 shadow">
-          <h2 className="text-xl font-semibold text-gray-900">
+          <h2 className="text-xl font-semibold">
             Sales History
           </h2>
 
           <p className="mt-1 text-sm text-gray-500">
-            Every sale recorded in the system
-            appears here.
+            Sales are loaded directly from
+            Supabase.
           </p>
 
           <div className="mt-6 overflow-x-auto">
-            <table className="w-full min-w-[900px] text-left">
+            <table className="w-full min-w-[1000px] text-left">
               <thead>
                 <tr className="border-b text-sm text-gray-500">
                   <th className="px-3 py-3">
                     Date
-                  </th>
-
-                  <th className="px-3 py-3">
-                    Sale ID
                   </th>
 
                   <th className="px-3 py-3">
@@ -852,78 +1694,86 @@ function SalesContent() {
                   </th>
 
                   <th className="px-3 py-3">
+                    Payment
+                  </th>
+
+                  <th className="px-3 py-3">
+                    Customer
+                  </th>
+
+                  <th className="px-3 py-3">
                     Total
                   </th>
                 </tr>
               </thead>
 
               <tbody>
-                {sales.map(
-                  (sale) => {
-                    const totalQuantity =
-                      sale.items.reduce(
-                        (
-                          sum,
-                          item,
-                        ) =>
-                          sum +
-                          item.quantity,
-                        0,
-                      );
+                {sales.map((sale) => {
+                  const quantityDisplay =
+                    sale.items
+                      .map(
+                        (item) =>
+                          `${formatQuantity(
+                            item.quantity,
+                          )} ${
+                            item.unit
+                          }`,
+                      )
+                      .join(", ");
 
-                    const productNames =
-                      sale.items
-                        .map(
-                          (item) =>
-                            item.productName,
-                        )
-                        .join(", ");
+                  return (
+                    <tr
+                      key={sale.id}
+                      className="border-b"
+                    >
+                      <td className="px-3 py-4 text-sm text-gray-600">
+                        {new Date(
+                          sale.createdAt,
+                        ).toLocaleString()}
+                      </td>
 
-                    return (
-                      <tr
-                        key={
-                          sale.id
+                      <td className="px-3 py-4 font-medium">
+                        {sale.items
+                          .map(
+                            (item) =>
+                              item.productName,
+                          )
+                          .join(", ") ||
+                          "—"}
+                      </td>
+
+                      <td className="px-3 py-4">
+                        {
+                          quantityDisplay
                         }
-                        className="border-b last:border-b-0"
-                      >
-                        <td className="px-3 py-4 text-gray-600">
-                          {new Date(
-                            sale.createdAt,
-                          ).toLocaleString()}
-                        </td>
+                      </td>
 
-                        <td className="px-3 py-4 text-xs text-gray-500">
-                          {sale.id}
-                        </td>
+                      <td className="px-3 py-4">
+                        {paymentLabel(
+                          sale.paymentMethod,
+                        )}
+                      </td>
 
-                        <td className="px-3 py-4 font-medium text-gray-900">
-                          {
-                            productNames
-                          }
-                        </td>
+                      <td className="px-3 py-4">
+                        {sale.customerName ||
+                          "Walk-in Customer"}
+                      </td>
 
-                        <td className="px-3 py-4 text-gray-600">
-                          {
-                            totalQuantity
-                          }
-                        </td>
-
-                        <td className="px-3 py-4 font-semibold text-gray-900">
-                          {formatRwf(
-                            sale.total,
-                          )}{" "}
-                          RWF
-                        </td>
-                      </tr>
-                    );
-                  },
-                )}
+                      <td className="px-3 py-4 font-semibold">
+                        {formatRwf(
+                          sale.totalAmount,
+                        )}{" "}
+                        RWF
+                      </td>
+                    </tr>
+                  );
+                })}
 
                 {sales.length ===
                   0 && (
                   <tr>
                     <td
-                      colSpan={5}
+                      colSpan={6}
                       className="px-3 py-8 text-center text-gray-500"
                     >
                       No sales recorded

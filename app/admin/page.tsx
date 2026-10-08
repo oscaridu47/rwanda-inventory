@@ -1,326 +1,269 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
-  createAdminAccount,
-  getAdminAccount,
-  getAdminSession,
-  loginAdmin,
-} from "@/app/lib/admin";
+  FormEvent,
+  useEffect,
+  useState,
+} from "react";
+import { useRouter } from "next/navigation";
+
+import {
+  isPlatformAdmin,
+} from "@/app/lib/auth";
+
+import { supabase } from "@/app/lib/supabase";
 
 export default function AdminPage() {
   const router = useRouter();
 
-  const [mode, setMode] = useState<
-    "login" | "setup"
-  >("login");
-
-  const [name, setName] = useState("");
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] =
-    useState("");
+
+  const [loading, setLoading] = useState(false);
+  const [checkingSession, setCheckingSession] =
+    useState(true);
 
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
 
   useEffect(() => {
-    const session = getAdminSession();
+    let cancelled = false;
 
-    if (session) {
-      router.replace("/admin/dashboard");
-      return;
+    async function checkExistingSession() {
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+
+        if (!session) {
+          if (!cancelled) {
+            setCheckingSession(false);
+          }
+
+          return;
+        }
+
+        const platformAdmin =
+          await isPlatformAdmin();
+
+        if (cancelled) {
+          return;
+        }
+
+        if (platformAdmin) {
+          router.replace("/admin/dashboard");
+          return;
+        }
+
+        /*
+         * A normal business user is not allowed
+         * to enter the platform-admin area.
+         */
+        await supabase.auth.signOut();
+
+        if (!cancelled) {
+          setCheckingSession(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setCheckingSession(false);
+        }
+      }
     }
 
-    const admin = getAdminAccount();
+    void checkExistingSession();
 
-    if (!admin) {
-      setMode("setup");
-    } else {
-      setMode("login");
-    }
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
-  function clearMessages() {
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
     setError("");
-    setSuccess("");
+
+    const cleanEmail =
+      email.trim().toLowerCase();
+
+    if (!cleanEmail) {
+      setError("Email is required.");
+      return;
+    }
+
+    if (!password) {
+      setError("Password is required.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      /*
+       * Authenticate through Supabase Auth.
+       */
+      const {
+        data,
+        error: signInError,
+      } =
+        await supabase.auth.signInWithPassword({
+          email: cleanEmail,
+          password,
+        });
+
+      if (signInError) {
+        throw new Error(
+          signInError.message ||
+            "Invalid email or password.",
+        );
+      }
+
+      if (!data.user || !data.session) {
+        throw new Error(
+          "Login succeeded but no active session was created.",
+        );
+      }
+
+      /*
+       * Confirm that this authenticated account
+       * is actually the platform administrator.
+       */
+      const platformAdmin =
+        await isPlatformAdmin();
+
+      if (!platformAdmin) {
+        await supabase.auth.signOut();
+
+        throw new Error(
+          "This account does not have platform administrator access.",
+        );
+      }
+
+      /*
+       * Only platform administrators can enter
+       * the administration dashboard.
+       */
+      router.replace("/admin/dashboard");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to sign in.",
+      );
+    } finally {
+      setLoading(false);
+    }
   }
 
-  function handleSetup(
-    event: FormEvent<HTMLFormElement>,
-  ) {
-    event.preventDefault();
+  if (checkingSession) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+        <div className="w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-slate-900" />
 
-    clearMessages();
-
-    if (!name.trim()) {
-      setError("Enter the admin name.");
-      return;
-    }
-
-    if (username.trim().length < 3) {
-      setError(
-        "Username must contain at least 3 characters.",
-      );
-      return;
-    }
-
-    if (password.length < 6) {
-      setError(
-        "Password must contain at least 6 characters.",
-      );
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      setError("Passwords do not match.");
-      return;
-    }
-
-    const admin = createAdminAccount({
-      name,
-      username,
-      password,
-    });
-
-    if (!admin) {
-      setError(
-        "An admin account already exists.",
-      );
-      return;
-    }
-
-    setSuccess(
-      "Admin account created. You can now sign in.",
+          <p className="text-sm text-slate-600">
+            Checking administrator session...
+          </p>
+        </div>
+      </main>
     );
-
-    setName("");
-    setUsername("");
-    setPassword("");
-    setConfirmPassword("");
-
-    setMode("login");
-  }
-
-  function handleLogin(
-    event: FormEvent<HTMLFormElement>,
-  ) {
-    event.preventDefault();
-
-    clearMessages();
-
-    const session = loginAdmin(
-      username,
-      password,
-    );
-
-    if (!session) {
-      setError(
-        "Incorrect admin username or password.",
-      );
-      return;
-    }
-
-    router.replace("/admin/dashboard");
   }
 
   return (
-    <main className="min-h-screen bg-gray-100 p-6">
-      <div className="mx-auto flex min-h-[90vh] max-w-md items-center">
-        <div className="w-full rounded-2xl bg-white p-8 shadow-lg">
-          <div className="text-center">
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-xl bg-black text-xl font-bold text-white">
-              RI
-            </div>
-
-            <h1 className="mt-5 text-3xl font-bold text-gray-900">
+    <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+      <div className="w-full max-w-md">
+        <section className="rounded-2xl bg-white p-8 shadow-sm">
+          <div className="mb-8 text-center">
+            <h1 className="text-3xl font-bold text-slate-900">
               RwandaInventory
             </h1>
 
-            <p className="mt-2 text-lg font-semibold text-gray-700">
-              Admin Portal
-            </p>
-
-            <p className="mt-1 text-sm text-gray-500">
-              Platform administration
+            <p className="mt-2 text-sm text-slate-500">
+              Platform Administrator
             </p>
           </div>
 
-          {mode === "setup" ? (
-            <form
-              onSubmit={handleSetup}
-              className="mt-8 space-y-5"
-            >
-              <div className="rounded-lg bg-blue-50 p-4 text-sm text-blue-800">
-                This is the first-time setup for the
-                RwandaInventory platform administrator.
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium">
-                  Admin Name
-                </label>
-
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(event) =>
-                    setName(event.target.value)
-                  }
-                  placeholder="Your name"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium">
-                  Admin Username
-                </label>
-
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(event) =>
-                    setUsername(
-                      event.target.value,
-                    )
-                  }
-                  placeholder="Choose admin username"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium">
-                  Admin Password
-                </label>
-
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(event) =>
-                    setPassword(
-                      event.target.value,
-                    )
-                  }
-                  placeholder="At least 6 characters"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium">
-                  Confirm Password
-                </label>
-
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(event) =>
-                    setConfirmPassword(
-                      event.target.value,
-                    )
-                  }
-                  placeholder="Repeat password"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
-                />
-              </div>
-
-              {error && (
-                <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-                  {error}
-                </div>
-              )}
-
-              {success && (
-                <div className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
-                  {success}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                className="w-full rounded-lg bg-black px-5 py-3 font-medium text-white hover:bg-gray-800"
-              >
-                Create Admin Account
-              </button>
-            </form>
-          ) : (
-            <form
-              onSubmit={handleLogin}
-              className="mt-8 space-y-5"
-            >
-              <div>
-                <label className="mb-2 block text-sm font-medium">
-                  Admin Username
-                </label>
-
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(event) =>
-                    setUsername(
-                      event.target.value,
-                    )
-                  }
-                  placeholder="Admin username"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium">
-                  Admin Password
-                </label>
-
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(event) =>
-                    setPassword(
-                      event.target.value,
-                    )
-                  }
-                  placeholder="Admin password"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
-                />
-              </div>
-
-              {error && (
-                <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-                  {error}
-                </div>
-              )}
-
-              {success && (
-                <div className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
-                  {success}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                className="w-full rounded-lg bg-black px-5 py-3 font-medium text-white hover:bg-gray-800"
-              >
-                Admin Sign In
-              </button>
-            </form>
+          {error && (
+            <div className="mb-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              {error}
+            </div>
           )}
 
-          <div className="mt-8 border-t pt-6 text-center">
-            <a
-              href="/auth"
-              className="text-sm font-medium text-blue-700 hover:text-blue-900"
-            >
-              ← Business Owner Login
-            </a>
-          </div>
+          <form
+            onSubmit={handleSubmit}
+            className="space-y-5"
+          >
+            <div>
+              <label
+                htmlFor="admin-email"
+                className="mb-2 block text-sm font-medium text-slate-700"
+              >
+                Administrator Email
+              </label>
 
-          <p className="mt-6 text-center text-xs text-gray-400">
-            RwandaInventory Platform Administration
-          </p>
-        </div>
+              <input
+                id="admin-email"
+                type="email"
+                value={email}
+                onChange={(event) =>
+                  setEmail(event.target.value)
+                }
+                autoComplete="email"
+                disabled={loading}
+                placeholder="admin@example.com"
+                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="admin-password"
+                className="mb-2 block text-sm font-medium text-slate-700"
+              >
+                Password
+              </label>
+
+              <input
+                id="admin-password"
+                type="password"
+                value={password}
+                onChange={(event) =>
+                  setPassword(event.target.value)
+                }
+                autoComplete="current-password"
+                disabled={loading}
+                placeholder="Your password"
+                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full rounded-xl bg-slate-900 px-5 py-3 font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {loading
+                ? "Signing in..."
+                : "Administrator Sign In"}
+            </button>
+          </form>
+
+          <div className="mt-6 border-t pt-6 text-center">
+            <button
+              type="button"
+              onClick={() => router.push("/auth")}
+              className="text-sm font-semibold text-blue-700 hover:text-blue-900"
+            >
+              Back to normal login
+            </button>
+          </div>
+        </section>
+
+        <p className="mt-6 text-center text-xs text-slate-400">
+          Secure platform administration powered by
+          Supabase
+        </p>
       </div>
     </main>
   );

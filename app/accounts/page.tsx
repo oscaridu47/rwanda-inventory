@@ -1,1562 +1,1012 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import PermissionGuard from "../components/PermissionGuard";
 import {
   getCurrentBusinessId,
   getCurrentUser,
-  getUsersByBusinessId,
   type User,
 } from "../lib/auth";
+import { supabase } from "../lib/supabase";
 import {
   getAllPermissions,
   getPermissionName,
-  getRoleName,
+  type AppRole,
   type Permission,
 } from "../lib/permissions";
 
-const USERS_STORAGE_KEY = "rwanda-inventory-users";
-const USERS_CHANGED_EVENT =
-  "rwanda-inventory-users-changed";
+type EmployeeRole = "manager" | "staff" | "worker";
 
-type EmployeeRole =
-  | "manager"
-  | "staff"
-  | "worker";
+type ApiEmployee = {
+  id: string;
+  userId?: string | null;
+  name: string;
+  username: string;
+  email?: string | null;
+  businessId: string;
+  role: EmployeeRole;
+  permissions: Permission[];
+  active: boolean;
+  createdAt: string;
+};
 
-const employeeRoles: EmployeeRole[] = [
-  "manager",
-  "staff",
-  "worker",
-];
+type EmployeeForm = {
+  name: string;
+  username: string;
+  email: string;
+  password: string;
+  role: EmployeeRole;
+  permissions: Permission[];
+};
 
-function createUserId(): string {
-  return `user-${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2, 9)}`;
+const ROLE_OPTIONS: EmployeeRole[] = ["manager", "staff", "worker"];
+
+const EMPTY_FORM: EmployeeForm = {
+  name: "",
+  username: "",
+  email: "",
+  password: "",
+  role: "staff",
+  permissions: [],
+};
+
+function apiEmployeeToUser(employee: ApiEmployee): User {
+  return {
+    id: employee.id,
+    name: employee.name,
+    username: employee.username,
+    email: employee.email ?? "",
+    role: employee.role,
+    permissions: employee.permissions,
+    businessId: employee.businessId,
+    active: employee.active,
+    createdAt: employee.createdAt,
+  };
 }
 
-function saveUsers(users: User[]): void {
-  localStorage.setItem(
-    USERS_STORAGE_KEY,
-    JSON.stringify(users),
-  );
-
-  window.dispatchEvent(
-    new Event(USERS_CHANGED_EVENT),
-  );
-}
-
-function formatDate(date: string): string {
-  const parsed = new Date(date);
-
-  if (Number.isNaN(parsed.getTime())) {
-    return "Unknown";
+function roleLabel(role: AppRole): string {
+  switch (role) {
+    case "owner":
+      return "Owner";
+    case "manager":
+      return "Manager";
+    case "staff":
+      return "Staff";
+    case "worker":
+      return "Worker";
+    default:
+      return role;
   }
-
-  return parsed.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-  });
 }
 
 export default function AccountsPage() {
-  const [currentUser, setCurrentUser] =
-    useState<User | null>(null);
+  const [employees, setEmployees] = useState<User[]>([]);
+  const [form, setForm] = useState<EmployeeForm>(EMPTY_FORM);
 
-  const [employees, setEmployees] =
-    useState<User[]>([]);
-
-  const [showCreateForm, setShowCreateForm] =
-    useState(false);
-
-  const [selectedEmployeeId, setSelectedEmployeeId] =
-    useState<string | null>(null);
-
-  const [name, setName] = useState("");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-
-  const [role, setRole] =
-    useState<EmployeeRole>("worker");
-
-  const [selectedPermissions, setSelectedPermissions] =
-    useState<Permission[]>([]);
-
-  const [editingPermissions, setEditingPermissions] =
-    useState<Permission[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  const allPermissions = useMemo(
-    () => getAllPermissions(),
-    [],
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [openPermissionsId, setOpenPermissionsId] = useState<string | null>(
+    null
   );
 
-  function loadEmployees() {
-    const user = getCurrentUser();
+  const currentUser = getCurrentUser();
+  const businessId = getCurrentBusinessId();
 
-    setCurrentUser(user);
+  const permissions = useMemo(() => getAllPermissions(), []);
 
-    if (!user || user.role !== "owner") {
-      setEmployees([]);
-      return;
-    }
+  async function getAccessToken(): Promise<string | null> {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
-    const businessId =
-      getCurrentBusinessId();
+    return session?.access_token ?? null;
+  }
 
-    if (!businessId) {
-      setEmployees([]);
-      return;
-    }
+  async function loadEmployees() {
+    setLoading(true);
+    setError("");
 
-    const businessEmployees =
-      getUsersByBusinessId(businessId).filter(
-        (employee) =>
-          employee.role !== "owner",
+    try {
+      const token = await getAccessToken();
+
+      if (!token) {
+        throw new Error("Your session has expired. Please log in again.");
+      }
+
+      const response = await fetch("/api/team-users", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        cache: "no-store",
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to load employees.");
+      }
+
+      const apiEmployees = Array.isArray(data?.employees)
+        ? (data.employees as ApiEmployee[])
+        : [];
+
+      setEmployees(apiEmployees.map(apiEmployeeToUser));
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to load employees."
       );
-
-    setEmployees(businessEmployees);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
-    loadEmployees();
-
-    const handleUsersChanged = () => {
-      loadEmployees();
-    };
-
-    window.addEventListener(
-      USERS_CHANGED_EVENT,
-      handleUsersChanged,
-    );
-
-    return () => {
-      window.removeEventListener(
-        USERS_CHANGED_EVENT,
-        handleUsersChanged,
-      );
-    };
+    void loadEmployees();
   }, []);
 
   function resetForm() {
-    setName("");
-    setUsername("");
-    setPassword("");
-    setRole("worker");
-    setSelectedPermissions([]);
+    setForm(EMPTY_FORM);
+    setEditingId(null);
     setError("");
     setSuccess("");
   }
 
-  function togglePermission(
-    permission: Permission,
+  function updateForm<K extends keyof EmployeeForm>(
+    field: K,
+    value: EmployeeForm[K]
   ) {
-    setSelectedPermissions((current) => {
-      if (current.includes(permission)) {
-        return current.filter(
-          (item) => item !== permission,
-        );
-      }
+    setForm((previous) => ({
+      ...previous,
+      [field]: value,
+    }));
+  }
 
-      return [...current, permission];
+  function toggleFormPermission(permission: Permission) {
+    setForm((previous) => {
+      const exists = previous.permissions.includes(permission);
+
+      return {
+        ...previous,
+        permissions: exists
+          ? previous.permissions.filter((item) => item !== permission)
+          : [...previous.permissions, permission],
+      };
     });
   }
 
-  function toggleEditingPermission(
-    permission: Permission,
-  ) {
-    setEditingPermissions((current) => {
-      if (current.includes(permission)) {
-        return current.filter(
-          (item) => item !== permission,
-        );
-      }
-
-      return [...current, permission];
-    });
+  function selectAllFormPermissions() {
+    setForm((previous) => ({
+      ...previous,
+      permissions: [...permissions],
+    }));
   }
 
-  function selectAllPermissions() {
-    setSelectedPermissions([
-      ...allPermissions,
-    ]);
+  function clearAllFormPermissions() {
+    setForm((previous) => ({
+      ...previous,
+      permissions: [],
+    }));
   }
 
-  function clearAllPermissions() {
-    setSelectedPermissions([]);
-  }
+  async function createEmployee(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
 
-  function selectAllEditingPermissions() {
-    setEditingPermissions([
-      ...allPermissions,
-    ]);
-  }
-
-  function clearAllEditingPermissions() {
-    setEditingPermissions([]);
-  }
-
-  function createEmployee() {
     setError("");
     setSuccess("");
 
-    const owner = getCurrentUser();
-
-    if (!owner) {
-      setError(
-        "You must be logged in to manage employees.",
-      );
-      return;
-    }
-
-    if (owner.role !== "owner") {
-      setError(
-        "Only the Business Owner can create employees.",
-      );
-      return;
-    }
-
-    const businessId =
-      getCurrentBusinessId();
-
-    if (!businessId) {
-      setError(
-        "Your account is not connected to a business.",
-      );
-      return;
-    }
-
-    const cleanName = name.trim();
-    const cleanUsername =
-      username.trim().toLowerCase();
-    const cleanPassword =
-      password.trim();
+    const cleanName = form.name.trim();
+    const cleanUsername = form.username.trim().toLowerCase();
+    const cleanEmail = form.email.trim().toLowerCase();
+    const cleanPassword = form.password;
 
     if (!cleanName) {
-      setError(
-        "Please enter the employee name.",
-      );
+      setError("Employee name is required.");
       return;
     }
 
     if (!cleanUsername) {
-      setError(
-        "Please enter a username.",
-      );
+      setError("Username is required.");
+      return;
+    }
+
+    if (!cleanEmail) {
+      setError("Email is required.");
       return;
     }
 
     if (!cleanPassword) {
-      setError(
-        "Please enter a password.",
-      );
+      setError("Password is required.");
       return;
     }
 
-    if (cleanPassword.length < 4) {
-      setError(
-        "Password must contain at least 4 characters.",
-      );
+    if (cleanPassword.length < 6) {
+      setError("Password must be at least 6 characters.");
       return;
     }
-
-    const allUsers = JSON.parse(
-      localStorage.getItem(
-        USERS_STORAGE_KEY,
-      ) || "[]",
-    ) as User[];
-
-    const usernameExists =
-      allUsers.some(
-        (user) =>
-          user.username.toLowerCase() ===
-          cleanUsername,
-      );
-
-    if (usernameExists) {
-      setError(
-        "That username is already in use.",
-      );
-      return;
-    }
-
-    const employee: User = {
-      id: createUserId(),
-      name: cleanName,
-      username: cleanUsername,
-      password: cleanPassword,
-      businessId,
-      role,
-      permissions: [
-        ...selectedPermissions,
-      ],
-      active: true,
-      createdAt:
-        new Date().toISOString(),
-    };
-
-    saveUsers([
-      ...allUsers,
-      employee,
-    ]);
-
-    resetForm();
-    setShowCreateForm(false);
-
-    setSuccess(
-      `${cleanName} was added successfully.`,
-    );
-
-    loadEmployees();
-  }
-
-  function toggleEmployeeStatus(
-    employee: User,
-  ) {
-    const businessId =
-      getCurrentBusinessId();
 
     if (!businessId) {
+      setError("No business is currently selected.");
       return;
     }
 
-    if (
-      employee.businessId !==
-      businessId
-    ) {
-      return;
-    }
+    setSaving(true);
 
-    const allUsers = JSON.parse(
-      localStorage.getItem(
-        USERS_STORAGE_KEY,
-      ) || "[]",
-    ) as User[];
+    try {
+      const token = await getAccessToken();
 
-    const updatedUsers =
-      allUsers.map((user) => {
-        if (user.id !== employee.id) {
-          return user;
-        }
+      if (!token) {
+        throw new Error("Your session has expired. Please log in again.");
+      }
 
-        if (
-          user.businessId !==
-          businessId
-        ) {
-          return user;
-        }
-
-        return {
-          ...user,
-          active: !user.active,
-        };
+      const response = await fetch("/api/team-users", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name: cleanName,
+          username: cleanUsername,
+          email: cleanEmail,
+          password: cleanPassword,
+          role: form.role,
+          permissions: form.permissions,
+          businessId,
+        }),
       });
 
-    saveUsers(updatedUsers);
+      const data = await response.json().catch(() => null);
 
-    setSuccess(
-      `${employee.name} is now ${
-        employee.active
-          ? "deactivated"
-          : "active"
-      }.`,
-    );
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to create employee.");
+      }
 
-    loadEmployees();
+      if (data?.employee) {
+        const createdEmployee = apiEmployeeToUser(
+          data.employee as ApiEmployee
+        );
+
+        setEmployees((previous) => [...previous, createdEmployee]);
+      } else {
+        await loadEmployees();
+      }
+
+      setSuccess("Employee account created successfully.");
+      setForm(EMPTY_FORM);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to create employee."
+      );
+    } finally {
+      setSaving(false);
+    }
   }
 
-  function deleteEmployee(
-    employee: User,
-  ) {
-    const businessId =
-      getCurrentBusinessId();
+  async function toggleEmployeeStatus(employee: User) {
+    setError("");
+    setSuccess("");
 
-    if (!businessId) {
-      return;
-    }
+    try {
+      const token = await getAccessToken();
 
-    if (
-      employee.businessId !==
-      businessId
-    ) {
-      return;
-    }
+      if (!token) {
+        throw new Error("Your session has expired. Please log in again.");
+      }
 
-    const confirmed =
-      window.confirm(
-        `Delete ${employee.name}'s account? This cannot be undone.`,
+      const response = await fetch("/api/team-users", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          id: employee.id,
+          active: !employee.active,
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          data?.error || "Failed to update employee status."
+        );
+      }
+
+      setEmployees((previous) =>
+        previous.map((item) =>
+          item.id === employee.id
+            ? {
+                ...item,
+                active: !item.active,
+              }
+            : item
+        )
       );
+
+      setSuccess(
+        `${employee.name} is now ${
+          employee.active ? "inactive" : "active"
+        }.`
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to update employee status."
+      );
+    }
+  }
+
+  async function saveEmployeePermissions(employee: User) {
+    setError("");
+    setSuccess("");
+
+    try {
+      const token = await getAccessToken();
+
+      if (!token) {
+        throw new Error("Your session has expired. Please log in again.");
+      }
+
+      const response = await fetch("/api/team-users", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          id: employee.id,
+          permissions: employee.permissions ?? [],
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to update permissions.");
+      }
+
+      setSuccess(`Permissions updated for ${employee.name}.`);
+      setOpenPermissionsId(null);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to update permissions."
+      );
+    }
+  }
+
+  async function deleteEmployee(employee: User) {
+    const confirmed = window.confirm(
+      `Delete the employee account for "${employee.name}"?\n\nThis action cannot be easily undone.`
+    );
 
     if (!confirmed) {
       return;
     }
 
-    const allUsers = JSON.parse(
-      localStorage.getItem(
-        USERS_STORAGE_KEY,
-      ) || "[]",
-    ) as User[];
-
-    const updatedUsers =
-      allUsers.filter((user) => {
-        if (user.id !== employee.id) {
-          return true;
-        }
-
-        return (
-          user.businessId !==
-          businessId
-        );
-      });
-
-    saveUsers(updatedUsers);
-
-    setSuccess(
-      `${employee.name}'s account was deleted.`,
-    );
-
-    if (
-      selectedEmployeeId ===
-      employee.id
-    ) {
-      setSelectedEmployeeId(null);
-      setEditingPermissions([]);
-    }
-
-    loadEmployees();
-  }
-
-  function openEmployee(
-    employee: User,
-  ) {
-    setSelectedEmployeeId(
-      (current) =>
-        current === employee.id
-          ? null
-          : employee.id,
-    );
-
-    setEditingPermissions([
-      ...(employee.permissions ?? []),
-    ]);
-
-    setError("");
-    setSuccess("");
-  }
-
-  function saveEmployeePermissions(
-    employee: User,
-  ) {
     setError("");
     setSuccess("");
 
-    const owner = getCurrentUser();
+    try {
+      const token = await getAccessToken();
 
-    if (!owner) {
-      setError(
-        "You must be logged in.",
+      if (!token) {
+        throw new Error("Your session has expired. Please log in again.");
+      }
+
+      const response = await fetch(
+        `/api/team-users?id=${encodeURIComponent(employee.id)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
       );
-      return;
-    }
 
-    if (owner.role !== "owner") {
-      setError(
-        "Only the Business Owner can change employee permissions.",
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to delete employee.");
+      }
+
+      setEmployees((previous) =>
+        previous.filter((item) => item.id !== employee.id)
       );
-      return;
-    }
 
-    const businessId =
-      getCurrentBusinessId();
+      if (editingId === employee.id) {
+        resetForm();
+      }
 
-    if (!businessId) {
+      if (openPermissionsId === employee.id) {
+        setOpenPermissionsId(null);
+      }
+
+      setSuccess(`Employee ${employee.name} was deleted.`);
+    } catch (err) {
       setError(
-        "Your account is not connected to a business.",
+        err instanceof Error ? err.message : "Failed to delete employee."
       );
-      return;
     }
+  }
 
-    if (
-      employee.businessId !==
-      businessId
-    ) {
-      setError(
-        "You cannot manage an employee from another business.",
-      );
-      return;
-    }
+  function startEditing(employee: User) {
+    setEditingId(employee.id);
+    setEmployees((previous) => [...previous]);
+    setSuccess("");
+    setError("");
+  }
 
-    const allUsers = JSON.parse(
-      localStorage.getItem(
-        USERS_STORAGE_KEY,
-      ) || "[]",
-    ) as User[];
-
-    const updatedUsers =
-      allUsers.map((user) => {
-        if (user.id !== employee.id) {
-          return user;
+  function updateEmployeePermission(
+    employeeId: string,
+    permission: Permission
+  ) {
+    setEmployees((previous) =>
+      previous.map((employee) => {
+        if (employee.id !== employeeId) {
+          return employee;
         }
 
-        if (
-          user.businessId !==
-          businessId
-        ) {
-          return user;
-        }
+        const currentPermissions = employee.permissions ?? [];
+        const exists = currentPermissions.includes(permission);
 
         return {
-          ...user,
-          permissions: [
-            ...editingPermissions,
-          ],
+          ...employee,
+          permissions: exists
+            ? currentPermissions.filter((item) => item !== permission)
+            : [...currentPermissions, permission],
         };
-      });
-
-    saveUsers(updatedUsers);
-
-    setSuccess(
-      `Access for ${employee.name} was updated successfully.`,
+      })
     );
-
-    loadEmployees();
   }
 
-  /*
-   * This was the missing variable that caused
-   * the TypeScript errors in the previous version.
-   */
-  const selectedEmployee =
-    employees.find(
-      (employee) =>
-        employee.id ===
-        selectedEmployeeId,
-    ) ?? null;
+  function selectAllEmployeePermissions(employeeId: string) {
+    setEmployees((previous) =>
+      previous.map((employee) =>
+        employee.id === employeeId
+          ? {
+              ...employee,
+              permissions: [...permissions],
+            }
+          : employee
+      )
+    );
+  }
+
+  function clearAllEmployeePermissions(employeeId: string) {
+    setEmployees((previous) =>
+      previous.map((employee) =>
+        employee.id === employeeId
+          ? {
+              ...employee,
+              permissions: [],
+            }
+          : employee
+      )
+    );
+  }
+
+  const visibleEmployees = employees.filter(
+    (employee) => employee.id !== currentUser?.id
+  );
 
   return (
     <PermissionGuard permission="accounts.manage">
-      <main
-        style={{
-          maxWidth: "1100px",
-          margin: "0 auto",
-          padding:
-            "32px 20px 60px",
-          fontFamily:
-            "Arial, sans-serif",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent:
-              "space-between",
-            alignItems: "center",
-            gap: "16px",
-            flexWrap: "wrap",
-            marginBottom:
-              "24px",
-          }}
-        >
-          <div>
-            <h1
-              style={{
-                margin: 0,
-                fontSize: "30px",
-              }}
-            >
-              Employee Accounts
-            </h1>
+      <main className="min-h-screen bg-slate-50 p-4 md:p-8">
+        <div className="mx-auto max-w-7xl space-y-6">
+          <div className="rounded-2xl bg-white p-6 shadow-sm">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900">
+                  Employee Accounts
+                </h1>
 
-            <p
-              style={{
-                marginTop: "8px",
-                color: "#666",
-              }}
-            >
-              Manage employees and
-              control exactly what
-              they can access.
-            </p>
+                <p className="mt-1 text-sm text-slate-500">
+                  Create and manage employee accounts for your business.
+                </p>
+              </div>
+
+              <div className="rounded-xl bg-slate-100 px-4 py-2 text-sm text-slate-600">
+                {employees.length} employee
+                {employees.length === 1 ? "" : "s"}
+              </div>
+            </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              resetForm();
+          {error && (
+            <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              {error}
+            </div>
+          )}
 
-              setShowCreateForm(
-                (current) =>
-                  !current,
-              );
-            }}
-            style={{
-              border: "none",
-              borderRadius: "8px",
-              padding:
-                "11px 18px",
-              background:
-                "#111827",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 600,
-            }}
-          >
-            {showCreateForm
-              ? "Close"
-              : "+ Add Employee"}
-          </button>
-        </div>
+          {success && (
+            <div className="rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700">
+              {success}
+            </div>
+          )}
 
-        {currentUser?.businessId && (
-          <div
-            style={{
-              background:
-                "#f3f4f6",
-              borderRadius: "10px",
-              padding:
-                "14px 16px",
-              marginBottom:
-                "20px",
-              fontSize: "14px",
-            }}
-          >
-            <strong>
-              Business-specific
-              access:
-            </strong>{" "}
-            Employees shown here
-            belong only to your
-            business.
-          </div>
-        )}
+          <section className="rounded-2xl bg-white p-6 shadow-sm">
+            <div className="mb-6">
+              <h2 className="text-lg font-semibold text-slate-900">
+                Create Employee
+              </h2>
 
-        {success && (
-          <div
-            style={{
-              padding:
-                "12px 14px",
-              borderRadius:
-                "8px",
-              background:
-                "#ecfdf5",
-              border:
-                "1px solid #a7f3d0",
-              marginBottom:
-                "18px",
-            }}
-          >
-            {success}
-          </div>
-        )}
+              <p className="mt-1 text-sm text-slate-500">
+                Employee passwords are securely handled by Supabase
+                Authentication.
+              </p>
+            </div>
 
-        {error && !showCreateForm && (
-          <div
-            style={{
-              padding:
-                "12px 14px",
-              borderRadius:
-                "8px",
-              background:
-                "#fef2f2",
-              border:
-                "1px solid #fecaca",
-              color:
-                "#991b1b",
-              marginBottom:
-                "18px",
-            }}
-          >
-            {error}
-          </div>
-        )}
-
-        {showCreateForm && (
-          <section
-            style={{
-              border:
-                "1px solid #ddd",
-              borderRadius:
-                "12px",
-              padding: "22px",
-              marginBottom:
-                "28px",
-              background:
-                "white",
-            }}
-          >
-            <h2
-              style={{
-                marginTop: 0,
-              }}
+            <form
+              onSubmit={createEmployee}
+              className="grid grid-cols-1 gap-5 md:grid-cols-2"
             >
-              Create Employee
-            </h2>
-
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns:
-                  "repeat(auto-fit, minmax(220px, 1fr))",
-                gap: "16px",
-              }}
-            >
-              <label>
-                <div
-                  style={{
-                    marginBottom:
-                      "6px",
-                    fontWeight: 600,
-                  }}
+              <div>
+                <label
+                  htmlFor="employee-name"
+                  className="mb-2 block text-sm font-medium text-slate-700"
                 >
                   Full Name
-                </div>
+                </label>
 
                 <input
-                  value={name}
+                  id="employee-name"
+                  type="text"
+                  value={form.name}
                   onChange={(event) =>
-                    setName(
-                      event.target.value,
-                    )
+                    updateForm("name", event.target.value)
                   }
-                  placeholder="Employee name"
-                  style={{
-                    width: "100%",
-                    padding: "10px",
-                    border:
-                      "1px solid #ccc",
-                    borderRadius:
-                      "7px",
-                  }}
+                  placeholder="Employee full name"
+                  className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
                 />
-              </label>
+              </div>
 
-              <label>
-                <div
-                  style={{
-                    marginBottom:
-                      "6px",
-                    fontWeight: 600,
-                  }}
+              <div>
+                <label
+                  htmlFor="employee-username"
+                  className="mb-2 block text-sm font-medium text-slate-700"
                 >
                   Username
-                </div>
+                </label>
 
                 <input
-                  value={username}
+                  id="employee-username"
+                  type="text"
+                  value={form.username}
                   onChange={(event) =>
-                    setUsername(
-                      event.target.value,
-                    )
+                    updateForm("username", event.target.value)
                   }
-                  placeholder="Username"
+                  placeholder="employee_username"
                   autoComplete="off"
-                  style={{
-                    width: "100%",
-                    padding: "10px",
-                    border:
-                      "1px solid #ccc",
-                    borderRadius:
-                      "7px",
-                  }}
+                  className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
                 />
-              </label>
+              </div>
 
-              <label>
-                <div
-                  style={{
-                    marginBottom:
-                      "6px",
-                    fontWeight: 600,
-                  }}
+              <div>
+                <label
+                  htmlFor="employee-email"
+                  className="mb-2 block text-sm font-medium text-slate-700"
                 >
-                  Password
-                </div>
+                  Email
+                </label>
 
                 <input
-                  type="password"
-                  value={password}
+                  id="employee-email"
+                  type="email"
+                  value={form.email}
                   onChange={(event) =>
-                    setPassword(
-                      event.target.value,
-                    )
+                    updateForm("email", event.target.value)
                   }
-                  placeholder="Password"
-                  autoComplete="new-password"
-                  style={{
-                    width: "100%",
-                    padding: "10px",
-                    border:
-                      "1px solid #ccc",
-                    borderRadius:
-                      "7px",
-                  }}
+                  placeholder="employee@example.com"
+                  autoComplete="off"
+                  className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
                 />
-              </label>
+              </div>
 
-              <label>
-                <div
-                  style={{
-                    marginBottom:
-                      "6px",
-                    fontWeight: 600,
-                  }}
+              <div>
+                <label
+                  htmlFor="employee-password"
+                  className="mb-2 block text-sm font-medium text-slate-700"
+                >
+                  Temporary Password
+                </label>
+
+                <input
+                  id="employee-password"
+                  type="password"
+                  value={form.password}
+                  onChange={(event) =>
+                    updateForm("password", event.target.value)
+                  }
+                  placeholder="Minimum 6 characters"
+                  autoComplete="new-password"
+                  className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="employee-role"
+                  className="mb-2 block text-sm font-medium text-slate-700"
                 >
                   Role
-                </div>
+                </label>
 
                 <select
-                  value={role}
+                  id="employee-role"
+                  value={form.role}
                   onChange={(event) =>
-                    setRole(
-                      event.target
-                        .value as EmployeeRole,
+                    updateForm(
+                      "role",
+                      event.target.value as EmployeeRole
                     )
                   }
-                  style={{
-                    width: "100%",
-                    padding: "10px",
-                    border:
-                      "1px solid #ccc",
-                    borderRadius:
-                      "7px",
-                    background:
-                      "white",
-                  }}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
                 >
-                  {employeeRoles.map(
-                    (item) => (
-                      <option
-                        key={item}
-                        value={item}
-                      >
-                        {getRoleName(
-                          item,
-                        )}
-                      </option>
-                    ),
-                  )}
+                  {ROLE_OPTIONS.map((role) => (
+                    <option key={role} value={role}>
+                      {roleLabel(role)}
+                    </option>
+                  ))}
                 </select>
-              </label>
-            </div>
+              </div>
 
-            <div
-              style={{
-                marginTop: "24px",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent:
-                    "space-between",
-                  alignItems:
-                    "center",
-                  gap: "12px",
-                  flexWrap:
-                    "wrap",
-                  marginBottom:
-                    "12px",
-                }}
-              >
-                <div>
-                  <h3
-                    style={{
-                      margin:
-                        "0 0 4px",
-                    }}
-                  >
-                    Approved Access
-                  </h3>
+              <div className="md:col-span-2">
+                <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-800">
+                      Initial Permissions
+                    </h3>
 
-                  <p
-                    style={{
-                      margin: 0,
-                      color: "#666",
-                      fontSize:
-                        "14px",
-                    }}
-                  >
-                    Choose exactly
-                    what this
-                    employee can
-                    access.
-                  </p>
+                    <p className="text-xs text-slate-500">
+                      Choose what this employee can access.
+                    </p>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={selectAllFormPermissions}
+                      className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-700"
+                    >
+                      Select All
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={clearAllFormPermissions}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      Clear All
+                    </button>
+                  </div>
                 </div>
 
-                <div
-                  style={{
-                    display:
-                      "flex",
-                    gap: "8px",
-                  }}
-                >
-                  <button
-                    type="button"
-                    onClick={
-                      selectAllPermissions
-                    }
-                    style={{
-                      padding:
-                        "8px 12px",
-                      border:
-                        "1px solid #ccc",
-                      borderRadius:
-                        "7px",
-                      background:
-                        "white",
-                      cursor:
-                        "pointer",
-                    }}
-                  >
-                    Select All
-                  </button>
+                <div className="grid grid-cols-1 gap-2 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {permissions.map((permission) => {
+                    const checked = form.permissions.includes(permission);
 
-                  <button
-                    type="button"
-                    onClick={
-                      clearAllPermissions
-                    }
-                    style={{
-                      padding:
-                        "8px 12px",
-                      border:
-                        "1px solid #ccc",
-                      borderRadius:
-                        "7px",
-                      background:
-                        "white",
-                      cursor:
-                        "pointer",
-                    }}
-                  >
-                    Clear All
-                  </button>
+                    return (
+                      <label
+                        key={permission}
+                        className="flex cursor-pointer items-center gap-3 rounded-lg bg-white p-3"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() =>
+                            toggleFormPermission(permission)
+                          }
+                          className="h-4 w-4 rounded border-slate-300"
+                        />
+
+                        <span className="text-sm text-slate-700">
+                          {getPermissionName(permission)}
+                        </span>
+                      </label>
+                    );
+                  })}
                 </div>
               </div>
 
-              <div
-                style={{
-                  display:
-                    "grid",
-                  gridTemplateColumns:
-                    "repeat(auto-fit, minmax(230px, 1fr))",
-                  gap: "8px",
-                }}
-              >
-                {allPermissions.map(
-                  (permission) => (
-                    <label
-                      key={permission}
-                      style={{
-                        display:
-                          "flex",
-                        alignItems:
-                          "center",
-                        gap: "9px",
-                        padding:
-                          "10px",
-                        border:
-                          "1px solid #e5e7eb",
-                        borderRadius:
-                          "7px",
-                        cursor:
-                          "pointer",
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedPermissions.includes(
-                          permission,
-                        )}
-                        onChange={() =>
-                          togglePermission(
-                            permission,
-                          )
-                        }
-                      />
+              <div className="flex flex-col gap-3 md:col-span-2 sm:flex-row">
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="rounded-xl bg-slate-900 px-5 py-3 font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {saving ? "Creating..." : "Create Employee"}
+                </button>
 
-                      <span>
-                        {getPermissionName(
-                          permission,
-                        )}
-                      </span>
-                    </label>
-                  ),
+                {(form.name ||
+                  form.username ||
+                  form.email ||
+                  form.password ||
+                  form.permissions.length > 0) && (
+                  <button
+                    type="button"
+                    onClick={resetForm}
+                    disabled={saving}
+                    className="rounded-xl border border-slate-300 bg-white px-5 py-3 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    Clear Form
+                  </button>
                 )}
               </div>
-            </div>
-
-            {error && (
-              <div
-                style={{
-                  marginTop: "16px",
-                  padding:
-                    "11px 13px",
-                  borderRadius:
-                    "8px",
-                  background:
-                    "#fef2f2",
-                  border:
-                    "1px solid #fecaca",
-                  color:
-                    "#991b1b",
-                }}
-              >
-                {error}
-              </div>
-            )}
-
-            <button
-              type="button"
-              onClick={
-                createEmployee
-              }
-              style={{
-                marginTop: "20px",
-                padding:
-                  "11px 18px",
-                border: "none",
-                borderRadius:
-                  "8px",
-                background:
-                  "#111827",
-                color: "white",
-                cursor:
-                  "pointer",
-                fontWeight: 600,
-              }}
-            >
-              Create Employee
-            </button>
+            </form>
           </section>
-        )}
 
-        <section>
-          <div
-            style={{
-              display: "flex",
-              justifyContent:
-                "space-between",
-              alignItems: "center",
-              marginBottom:
-                "14px",
-            }}
-          >
-            <h2
-              style={{
-                margin: 0,
-              }}
-            >
-              Your Employees
-            </h2>
+          <section className="rounded-2xl bg-white shadow-sm">
+            <div className="border-b border-slate-200 p-6">
+              <h2 className="text-lg font-semibold text-slate-900">
+                Employees
+              </h2>
 
-            <span
-              style={{
-                color: "#666",
-                fontSize:
-                  "14px",
-              }}
-            >
-              {employees.length} employee
-              {employees.length === 1
-                ? ""
-                : "s"}
-            </span>
-          </div>
-
-          {employees.length === 0 ? (
-            <div
-              style={{
-                border:
-                  "1px dashed #ccc",
-                borderRadius:
-                  "10px",
-                padding: "30px",
-                textAlign:
-                  "center",
-                color: "#666",
-              }}
-            >
-              No employees have
-              been created yet.
+              <p className="mt-1 text-sm text-slate-500">
+                Manage employee status, roles, and permissions.
+              </p>
             </div>
-          ) : (
-            <div
-              style={{
-                display:
-                  "grid",
-                gap: "14px",
-              }}
-            >
-              {employees.map(
-                (employee) => (
-                  <div
-                    key={employee.id}
-                    style={{
-                      border:
-                        "1px solid #ddd",
-                      borderRadius:
-                        "10px",
-                      padding:
-                        "18px",
-                      background:
-                        "white",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display:
-                          "flex",
-                        justifyContent:
-                          "space-between",
-                        gap: "16px",
-                        flexWrap:
-                          "wrap",
-                      }}
-                    >
-                      <div>
-                        <h3
-                          style={{
-                            margin:
-                              "0 0 6px",
-                          }}
-                        >
-                          {employee.name}
-                        </h3>
 
-                        <div
-                          style={{
-                            color:
-                              "#666",
-                            fontSize:
-                              "14px",
-                          }}
-                        >
-                          @
-                          {
-                            employee.username
-                          }
+            {loading ? (
+              <div className="p-8 text-center text-sm text-slate-500">
+                Loading employees...
+              </div>
+            ) : visibleEmployees.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="font-medium text-slate-700">
+                  No employee accounts yet.
+                </p>
+
+                <p className="mt-1 text-sm text-slate-500">
+                  Create your first employee account above.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-200">
+                {visibleEmployees.map((employee) => {
+                  const employeePermissions =
+                    employee.permissions ?? [];
+
+                  const permissionsOpen =
+                    openPermissionsId === employee.id;
+
+                  return (
+                    <div key={employee.id} className="p-6">
+                      <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="font-semibold text-slate-900">
+                              {employee.name}
+                            </h3>
+
+                            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
+                              {roleLabel(employee.role)}
+                            </span>
+
+                            <span
+                              className={`rounded-full px-3 py-1 text-xs font-medium ${
+                                employee.active
+                                  ? "bg-green-100 text-green-700"
+                                  : "bg-red-100 text-red-700"
+                              }`}
+                            >
+                              {employee.active
+                                ? "Active"
+                                : "Inactive"}
+                            </span>
+                          </div>
+
+                          <div className="mt-2 flex flex-col gap-1 text-sm text-slate-500 sm:flex-row sm:gap-4">
+                            <span>
+                              Username:{" "}
+                              <span className="font-medium text-slate-700">
+                                {employee.username}
+                              </span>
+                            </span>
+
+                            {employee.email && (
+                              <span>
+                                Email:{" "}
+                                <span className="font-medium text-slate-700">
+                                  {employee.email}
+                                </span>
+                              </span>
+                            )}
+
+                            {editingId === employee.id && (
+                              <span>
+                                Account ID:{" "}
+                                <span className="font-mono text-xs">
+                                  {employee.id}
+                                </span>
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="mt-4">
+                            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Permissions
+                            </p>
+
+                            <div className="flex flex-wrap gap-2">
+                              {employeePermissions.length === 0 ? (
+                                <span className="text-sm text-slate-400">
+                                  No permissions assigned
+                                </span>
+                              ) : (
+                                employeePermissions.map(
+                                  (permission) => (
+                                    <span
+                                      key={permission}
+                                      className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs text-slate-700"
+                                    >
+                                      {getPermissionName(permission)}
+                                    </span>
+                                  )
+                                )
+                              )}
+                            </div>
+                          </div>
                         </div>
 
-                        <div
-                          style={{
-                            marginTop:
-                              "8px",
-                            display:
-                              "flex",
-                            gap: "8px",
-                            flexWrap:
-                              "wrap",
-                          }}
-                        >
-                          <span
-                            style={{
-                              padding:
-                                "4px 8px",
-                              borderRadius:
-                                "999px",
-                              background:
-                                "#f3f4f6",
-                              fontSize:
-                                "12px",
-                            }}
-                          >
-                            {getRoleName(
-                              employee.role,
-                            )}
-                          </span>
-
-                          <span
-                            style={{
-                              padding:
-                                "4px 8px",
-                              borderRadius:
-                                "999px",
-                              background:
-                                employee.active
-                                  ? "#ecfdf5"
-                                  : "#fef2f2",
-                              fontSize:
-                                "12px",
-                            }}
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              toggleEmployeeStatus(employee)
+                            }
+                            className={`rounded-lg px-4 py-2 text-sm font-medium ${
+                              employee.active
+                                ? "border border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                                : "border border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
+                            }`}
                           >
                             {employee.active
-                              ? "Active"
-                              : "Inactive"}
-                          </span>
+                              ? "Deactivate"
+                              : "Activate"}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              startEditing(employee);
+                              setOpenPermissionsId(
+                                permissionsOpen
+                                  ? null
+                                  : employee.id
+                              );
+                            }}
+                            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            {permissionsOpen
+                              ? "Close Permissions"
+                              : "Permissions"}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              deleteEmployee(employee)
+                            }
+                            className="rounded-lg border border-red-200 bg-white px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50"
+                          >
+                            Delete
+                          </button>
                         </div>
                       </div>
 
-                      <div
-                        style={{
-                          display:
-                            "flex",
-                          gap: "8px",
-                          flexWrap:
-                            "wrap",
-                        }}
-                      >
-                        <button
-                          type="button"
-                          onClick={() =>
-                            openEmployee(
-                              employee,
-                            )
-                          }
-                          style={{
-                            padding:
-                              "8px 12px",
-                            border:
-                              "1px solid #ccc",
-                            borderRadius:
-                              "7px",
-                            background:
-                              "white",
-                            cursor:
-                              "pointer",
-                          }}
-                        >
-                          {selectedEmployeeId ===
-                          employee.id
-                            ? "Hide Access"
-                            : "Manage Access"}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            toggleEmployeeStatus(
-                              employee,
-                            )
-                          }
-                          style={{
-                            padding:
-                              "8px 12px",
-                            border:
-                              "1px solid #ccc",
-                            borderRadius:
-                              "7px",
-                            background:
-                              "white",
-                            cursor:
-                              "pointer",
-                          }}
-                        >
-                          {employee.active
-                            ? "Deactivate"
-                            : "Activate"}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            deleteEmployee(
-                              employee,
-                            )
-                          }
-                          style={{
-                            padding:
-                              "8px 12px",
-                            border:
-                              "1px solid #fecaca",
-                            borderRadius:
-                              "7px",
-                            background:
-                              "#fff5f5",
-                            color:
-                              "#991b1b",
-                            cursor:
-                              "pointer",
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-
-                    {selectedEmployee &&
-                      selectedEmployee.id ===
-                        employee.id && (
-                        <div
-                          style={{
-                            marginTop:
-                              "18px",
-                            paddingTop:
-                              "18px",
-                            borderTop:
-                              "1px solid #eee",
-                          }}
-                        >
-                          <div
-                            style={{
-                              display:
-                                "flex",
-                              justifyContent:
-                                "space-between",
-                              alignItems:
-                                "center",
-                              gap: "10px",
-                              flexWrap:
-                                "wrap",
-                              marginBottom:
-                                "14px",
-                            }}
-                          >
+                      {permissionsOpen && (
+                        <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-5">
+                          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <div>
-                              <strong>
-                                Manage Access
-                              </strong>
+                              <h4 className="font-semibold text-slate-800">
+                                Manage Permissions
+                              </h4>
 
-                              <p
-                                style={{
-                                  margin:
-                                    "5px 0 0",
-                                  color:
-                                    "#666",
-                                  fontSize:
-                                    "13px",
-                                }}
-                              >
-                                Select the
-                                information
-                                and actions
-                                this employee
-                                is allowed to
-                                use.
+                              <p className="text-xs text-slate-500">
+                                Changes are not saved until you click
+                                Save Permissions.
                               </p>
                             </div>
 
-                            <span
-                              style={{
-                                color:
-                                  "#666",
-                                fontSize:
-                                  "13px",
-                              }}
-                            >
-                              Created{" "}
-                              {formatDate(
-                                employee.createdAt,
-                              )}
-                            </span>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  selectAllEmployeePermissions(
+                                    employee.id
+                                  )
+                                }
+                                className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-700"
+                              >
+                                Select All
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  clearAllEmployeePermissions(
+                                    employee.id
+                                  )
+                                }
+                                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                              >
+                                Clear All
+                              </button>
+                            </div>
                           </div>
 
-                          <div
-                            style={{
-                              display:
-                                "flex",
-                              gap: "8px",
-                              flexWrap:
-                                "wrap",
-                              marginBottom:
-                                "14px",
-                            }}
-                          >
-                            <button
-                              type="button"
-                              onClick={
-                                selectAllEditingPermissions
-                              }
-                              style={{
-                                padding:
-                                  "8px 12px",
-                                border:
-                                  "1px solid #ccc",
-                                borderRadius:
-                                  "7px",
-                                background:
-                                  "white",
-                                cursor:
-                                  "pointer",
-                              }}
-                            >
-                              Select All
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={
-                                clearAllEditingPermissions
-                              }
-                              style={{
-                                padding:
-                                  "8px 12px",
-                                border:
-                                  "1px solid #ccc",
-                                borderRadius:
-                                  "7px",
-                                background:
-                                  "white",
-                                cursor:
-                                  "pointer",
-                              }}
-                            >
-                              Remove All
-                            </button>
-                          </div>
-
-                          <div
-                            style={{
-                              display:
-                                "grid",
-                              gridTemplateColumns:
-                                "repeat(auto-fit, minmax(230px, 1fr))",
-                              gap: "8px",
-                            }}
-                          >
-                            {allPermissions.map(
-                              (
-                                permission,
-                              ) => {
-                                const checked =
-                                  editingPermissions.includes(
-                                    permission,
-                                  );
-
-                                return (
-                                  <label
-                                    key={
-                                      permission
-                                    }
-                                    style={{
-                                      display:
-                                        "flex",
-                                      alignItems:
-                                        "center",
-                                      gap: "9px",
-                                      padding:
-                                        "11px",
-                                      border:
-                                        checked
-                                          ? "1px solid #9ca3af"
-                                          : "1px solid #e5e7eb",
-                                      borderRadius:
-                                        "7px",
-                                      background:
-                                        checked
-                                          ? "#f3f4f6"
-                                          : "white",
-                                      cursor:
-                                        "pointer",
-                                    }}
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={
-                                        checked
-                                      }
-                                      onChange={() =>
-                                        toggleEditingPermission(
-                                          permission,
-                                        )
-                                      }
-                                    />
-
-                                    <span>
-                                      {getPermissionName(
-                                        permission,
-                                      )}
-                                    </span>
-                                  </label>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                            {permissions.map((permission) => {
+                              const checked =
+                                employeePermissions.includes(
+                                  permission
                                 );
-                              },
-                            )}
+
+                              return (
+                                <label
+                                  key={permission}
+                                  className="flex cursor-pointer items-center gap-3 rounded-lg bg-white p-3"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() =>
+                                      updateEmployeePermission(
+                                        employee.id,
+                                        permission
+                                      )
+                                    }
+                                    className="h-4 w-4 rounded border-slate-300"
+                                  />
+
+                                  <span className="text-sm text-slate-700">
+                                    {getPermissionName(permission)}
+                                  </span>
+                                </label>
+                              );
+                            })}
                           </div>
 
-                          <div
-                            style={{
-                              marginTop:
-                                "18px",
-                              display:
-                                "flex",
-                              justifyContent:
-                                "space-between",
-                              alignItems:
-                                "center",
-                              gap: "12px",
-                              flexWrap:
-                                "wrap",
-                            }}
-                          >
-                            <span
-                              style={{
-                                color:
-                                  "#666",
-                                fontSize:
-                                  "13px",
-                              }}
+                          <div className="mt-5 flex flex-wrap gap-3">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                saveEmployeePermissions(employee)
+                              }
+                              className="rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-700"
                             >
-                              {
-                                editingPermissions.length
-                              }{" "}
-                              permission
-                              {editingPermissions.length ===
-                              1
-                                ? ""
-                                : "s"}{" "}
-                              selected
-                            </span>
+                              Save Permissions
+                            </button>
 
                             <button
                               type="button"
                               onClick={() =>
-                                saveEmployeePermissions(
-                                  employee,
-                                )
+                                setOpenPermissionsId(null)
                               }
-                              style={{
-                                border:
-                                  "none",
-                                borderRadius:
-                                  "8px",
-                                padding:
-                                  "11px 18px",
-                                background:
-                                  "#111827",
-                                color:
-                                  "white",
-                                cursor:
-                                  "pointer",
-                                fontWeight:
-                                  600,
-                              }}
+                              className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
                             >
-                              Save Permissions
+                              Cancel
                             </button>
                           </div>
-
-                          {error && (
-                            <div
-                              style={{
-                                marginTop:
-                                  "14px",
-                                padding:
-                                  "11px 13px",
-                                borderRadius:
-                                  "8px",
-                                background:
-                                  "#fef2f2",
-                                border:
-                                  "1px solid #fecaca",
-                                color:
-                                  "#991b1b",
-                              }}
-                            >
-                              {error}
-                            </div>
-                          )}
                         </div>
                       )}
-                  </div>
-                ),
-              )}
-            </div>
-          )}
-        </section>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </div>
       </main>
     </PermissionGuard>
   );

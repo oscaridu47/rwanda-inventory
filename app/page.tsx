@@ -5,71 +5,77 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import {
+  getCurrentBusiness,
   getCurrentUser,
-  getCurrentBusinessId,
   logout,
+  type CachedBusiness,
   type User,
 } from "@/app/lib/auth";
-
-import {
-  getBusinessById,
-  type Business,
-} from "@/app/lib/businesses";
 
 import { hasPermission } from "@/app/lib/permissions";
 
 export default function DashboardPage() {
   const router = useRouter();
 
-  const [user, setUser] =
-    useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(null);
 
   const [business, setBusiness] =
-    useState<Business | null>(null);
+    useState<CachedBusiness | null>(null);
 
-  const [loading, setLoading] =
-    useState(true);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const currentUser =
-      getCurrentUser();
+    let cancelled = false;
 
-    if (!currentUser) {
-      router.replace("/auth");
-      return;
+    async function loadDashboard() {
+      try {
+        const currentUser = getCurrentUser();
+
+        if (!currentUser) {
+          router.replace("/auth");
+          return;
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setUser(currentUser);
+
+        /*
+         * Load the current business directly
+         * from Supabase through auth.ts.
+         *
+         * This replaces the old localStorage
+         * businesses.ts system.
+         */
+        const currentBusiness = await getCurrentBusiness();
+
+        if (cancelled) {
+          return;
+        }
+
+        setBusiness(currentBusiness);
+      } catch {
+        if (!cancelled) {
+          setBusiness(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     }
 
-    setUser(currentUser);
+    void loadDashboard();
 
-    /*
-     * Get the business connected to
-     * this logged-in account.
-     *
-     * This works for both:
-     * - Owner
-     * - Manager
-     * - Staff
-     * - Worker
-     */
-    const businessId =
-      getCurrentBusinessId();
-
-    if (businessId) {
-      const currentBusiness =
-        getBusinessById(
-          businessId,
-        );
-
-      setBusiness(currentBusiness);
-    } else {
-      setBusiness(null);
-    }
-
-    setLoading(false);
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   function handleLogout() {
-    logout();
+    void logout();
     router.replace("/auth");
   }
 
@@ -87,81 +93,71 @@ export default function DashboardPage() {
     return null;
   }
 
-  const isOwner =
-    user.role === "owner";
+  const isOwner = user.role === "owner";
 
   /*
    * IMPORTANT:
    *
    * The third argument is user.permissions.
    *
-   * This means the Owner's custom
-   * permissions are used instead of
-   * only the default role permissions.
+   * This means the user's actual custom
+   * permissions are respected instead of
+   * relying only on default role permissions.
    */
 
-  const canViewProducts =
-    hasPermission(
-      user.role,
-      "products.view",
-      user.permissions,
-    );
+  const canViewProducts = hasPermission(
+    user.role,
+    "products.view",
+    user.permissions,
+  );
 
-  const canCreateProducts =
-    hasPermission(
-      user.role,
-      "products.create",
-      user.permissions,
-    );
+  const canCreateProducts = hasPermission(
+    user.role,
+    "products.create",
+    user.permissions,
+  );
 
-  const canViewStock =
-    hasPermission(
-      user.role,
-      "stock.view",
-      user.permissions,
-    );
+  const canViewStock = hasPermission(
+    user.role,
+    "stock.view",
+    user.permissions,
+  );
 
-  const canViewSales =
-    hasPermission(
-      user.role,
-      "sales.view",
-      user.permissions,
-    );
+  const canViewSales = hasPermission(
+    user.role,
+    "sales.view",
+    user.permissions,
+  );
 
-  const canCreateSales =
-    hasPermission(
-      user.role,
-      "sales.create",
-      user.permissions,
-    );
+  const canCreateSales = hasPermission(
+    user.role,
+    "sales.create",
+    user.permissions,
+  );
 
-  const canViewReports =
-    hasPermission(
-      user.role,
-      "reports.view",
-      user.permissions,
-    );
+  const canViewReports = hasPermission(
+    user.role,
+    "reports.view",
+    user.permissions,
+  );
 
-  const canManageAccounts =
-    hasPermission(
-      user.role,
-      "accounts.manage",
-      user.permissions,
-    );
+  const canManageAccounts = hasPermission(
+    user.role,
+    "accounts.manage",
+    user.permissions,
+  );
 
-  const canManageSettings =
-    hasPermission(
-      user.role,
-      "settings.manage",
-      user.permissions,
-    );
+  const canManageSettings = hasPermission(
+    user.role,
+    "settings.manage",
+    user.permissions,
+  );
 
-  const canViewExpenses =
-    hasPermission(
-      user.role,
-      "expenses.view",
-      user.permissions,
-    );
+  const canViewExpenses = hasPermission(
+    user.role,
+    "expenses.view",
+    user.permissions,
+  );
 
   return (
     <main className="min-h-screen bg-gray-100">
@@ -213,20 +209,18 @@ export default function DashboardPage() {
             </h2>
 
             <p className="mt-2 text-gray-300">
-              Manage your business, products,
-              stock and sales from one place.
+              Manage your business, products, stock and sales
+              from one place.
             </p>
 
             {business && (
               <div className="mt-5 flex flex-wrap gap-3">
                 <span className="rounded-full bg-white/10 px-4 py-2 text-sm">
-                  Business:{" "}
-                  {business.businessName}
+                  Business: {business.businessName}
                 </span>
 
                 <span className="rounded-full bg-white/10 px-4 py-2 text-sm capitalize">
-                  Status:{" "}
-                  {business.status}
+                  Status: {business.status}
                 </span>
 
                 <span className="rounded-full bg-white/10 px-4 py-2 text-sm">
@@ -254,17 +248,15 @@ export default function DashboardPage() {
                 href="/products"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  📦
-                </div>
+                <div className="text-4xl">📦</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Products
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  Register, edit and manage
-                  products in your business.
+                  Register, edit and manage products in your
+                  business.
                 </p>
               </Link>
             )}
@@ -274,17 +266,15 @@ export default function DashboardPage() {
                 href="/products/add"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  ➕
-                </div>
+                <div className="text-4xl">➕</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Add Product
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  Register a new product,
-                  barcode, price and stock.
+                  Register a new product, barcode, price and
+                  stock.
                 </p>
               </Link>
             )}
@@ -294,18 +284,15 @@ export default function DashboardPage() {
                 href="/stock"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  📥
-                </div>
+                <div className="text-4xl">📥</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Stock
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  Receive stock, make
-                  adjustments and check stock
-                  history.
+                  Receive stock, make adjustments and check
+                  stock history.
                 </p>
               </Link>
             )}
@@ -315,17 +302,14 @@ export default function DashboardPage() {
                 href="/sales"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  🛒
-                </div>
+                <div className="text-4xl">🛒</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Sales
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  View and manage business
-                  sales.
+                  View and manage business sales.
                 </p>
               </Link>
             )}
@@ -335,18 +319,15 @@ export default function DashboardPage() {
                 href="/sales/new"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  💰
-                </div>
+                <div className="text-4xl">💰</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Record Sale
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  Record a new customer sale
-                  and automatically update
-                  stock.
+                  Record a new customer sale and automatically
+                  update stock.
                 </p>
               </Link>
             )}
@@ -356,17 +337,14 @@ export default function DashboardPage() {
                 href="/reports"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  📊
-                </div>
+                <div className="text-4xl">📊</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Reports
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  View sales, stock and
-                  business performance
+                  View sales, stock and business performance
                   reports.
                 </p>
               </Link>
@@ -377,17 +355,14 @@ export default function DashboardPage() {
                 href="/expenses"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  💵
-                </div>
+                <div className="text-4xl">💵</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Expenses
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  View and manage business
-                  expenses.
+                  View and manage business expenses.
                 </p>
               </Link>
             )}
@@ -397,17 +372,15 @@ export default function DashboardPage() {
                 href="/accounts"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  👥
-                </div>
+                <div className="text-4xl">👥</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Employee Accounts
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  Create and manage Manager,
-                  Staff and Worker accounts.
+                  Create and manage Manager, Staff and Worker
+                  accounts.
                 </p>
               </Link>
             )}
@@ -417,17 +390,15 @@ export default function DashboardPage() {
                 href="/settings"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  ⚙️
-                </div>
+                <div className="text-4xl">⚙️</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Settings
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  Manage business settings,
-                  units and packaging.
+                  Manage business settings, units and
+                  packaging.
                 </p>
               </Link>
             )}
@@ -437,18 +408,15 @@ export default function DashboardPage() {
                 href="/subscription"
                 className="rounded-2xl bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
               >
-                <div className="text-4xl">
-                  🔐
-                </div>
+                <div className="text-4xl">🔐</div>
 
                 <h3 className="mt-4 text-xl font-bold text-gray-900">
                   Subscription
                 </h3>
 
                 <p className="mt-2 text-sm text-gray-600">
-                  View your plan, payment
-                  status and subscription
-                  expiry.
+                  View your plan, payment status and
+                  subscription expiry.
                 </p>
               </Link>
             )}
@@ -462,8 +430,8 @@ export default function DashboardPage() {
             </h3>
 
             <p className="mt-1 text-sm text-yellow-800">
-              Your account is not currently
-              connected to a business.
+              Your account is not currently connected to a
+              business.
             </p>
           </section>
         )}

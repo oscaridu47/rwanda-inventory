@@ -1,46 +1,248 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
 import Link from "next/link";
 
+import BarcodeScanner from "@/app/components/BarcodeScanner";
 import PermissionGuard from "@/app/components/PermissionGuard";
 
 import {
-  getCurrentUser,
+  hydrateCurrentUser,
   type User,
 } from "@/app/lib/auth";
 
-import {
-  getBusinessByOwnerUserId,
-  getBusinessById,
-  type Business,
-} from "@/app/lib/businesses";
+import { supabase } from "@/app/lib/supabase";
 
-import {
-  getProducts,
-  adjustProductQuantity,
-  subscribeToProducts,
-  type Product,
-} from "@/app/lib/products";
+type PaymentMethod =
+  | "cash"
+  | "mobile_money"
+  | "card"
+  | "credit"
+  | "other";
 
-import {
-  createSale,
-  type SaleItem,
-} from "@/app/lib/sales";
+type Product = {
+  id: string;
+  businessId: string;
+  name: string;
+  barcode: string;
+  category: string;
+  quantity: number;
+  unit: string;
+  buyingPrice: number;
+  sellingPrice: number;
+};
 
-type CartItem = SaleItem;
+type PackagingConfig = {
+  productId: string;
+  baseUnit: string;
+  factors: Record<string, number>;
+};
+
+type DatabaseProduct = {
+  id: string;
+  business_id: string;
+  name: string;
+  barcode: string | null;
+  category: string | null;
+  quantity: number | string;
+  unit: string;
+  buying_price: number | string;
+  selling_price: number | string;
+};
+
+type DatabasePackagingConfig = {
+  product_id: string;
+  base_unit: string;
+  factors: unknown;
+};
+
+type CartItem = {
+  productId: string;
+  productName: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  buyingPrice: number;
+  total: number;
+};
+
+function mapProduct(
+  row: DatabaseProduct,
+): Product {
+  return {
+    id: row.id,
+    businessId: row.business_id,
+    name: row.name,
+    barcode: row.barcode ?? "",
+    category: row.category ?? "",
+    quantity: Number(row.quantity),
+    unit: row.unit,
+    buyingPrice: Number(
+      row.buying_price,
+    ),
+    sellingPrice: Number(
+      row.selling_price,
+    ),
+  };
+}
+
+function normalizePackagingFactors(
+  value: unknown,
+): Record<string, number> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return {};
+  }
+
+  const result: Record<
+    string,
+    number
+  > = {};
+
+  for (const [
+    key,
+    rawValue,
+  ] of Object.entries(
+    value as Record<
+      string,
+      unknown
+    >,
+  )) {
+    const numericValue =
+      Number(rawValue);
+
+    if (
+      Number.isFinite(
+        numericValue,
+      ) &&
+      numericValue > 0
+    ) {
+      result[key] =
+        numericValue;
+    }
+  }
+
+  return result;
+}
+
+function mapPackagingConfig(
+  row: DatabasePackagingConfig,
+): PackagingConfig {
+  return {
+    productId:
+      row.product_id,
+    baseUnit:
+      row.base_unit,
+    factors:
+      normalizePackagingFactors(
+        row.factors,
+      ),
+  };
+}
+
+function formatRwf(
+  value: number,
+) {
+  return new Intl.NumberFormat(
+    "en-RW",
+  ).format(value);
+}
+
+function formatQuantity(
+  value: number,
+) {
+  if (Number.isInteger(value)) {
+    return value.toString();
+  }
+
+  return value
+    .toFixed(3)
+    .replace(/0+$/, "")
+    .replace(/\.$/, "");
+}
+
+function unitAllowsFraction(
+  unit: string,
+) {
+  return (
+    unit === "Kg" ||
+    unit === "Litre"
+  );
+}
+
+const paymentMethods: {
+  value: PaymentMethod;
+  label: string;
+}[] = [
+  {
+    value: "cash",
+    label: "Cash",
+  },
+  {
+    value: "mobile_money",
+    label: "Mobile Money",
+  },
+  {
+    value: "card",
+    label: "Card",
+  },
+  {
+    value: "credit",
+    label: "Credit",
+  },
+  {
+    value: "other",
+    label: "Other",
+  },
+];
 
 function RecordSaleContent() {
-  const [user, setUser] = useState<User | null>(null);
-
-  const [business, setBusiness] =
-    useState<Business | null>(null);
+  const [user, setUser] =
+    useState<User | null>(null);
 
   const [products, setProducts] =
     useState<Product[]>([]);
 
-  const [selectedProductId, setSelectedProductId] =
+  const [
+    packagingConfigs,
+    setPackagingConfigs,
+  ] = useState<
+    Record<
+      string,
+      PackagingConfig
+    >
+  >({});
+
+  const [
+    businessName,
+    setBusinessName,
+  ] = useState("");
+
+  const [businessId, setBusinessId] =
     useState("");
+
+  const [
+    businessStatus,
+    setBusinessStatus,
+  ] = useState("");
+
+  const [
+    selectedProductId,
+    setSelectedProductId,
+  ] = useState("");
+
+  const [
+    selectedUnit,
+    setSelectedUnit,
+  ] = useState("");
 
   const [quantity, setQuantity] =
     useState("1");
@@ -48,65 +250,414 @@ function RecordSaleContent() {
   const [cart, setCart] =
     useState<CartItem[]>([]);
 
+  const [
+    customerName,
+    setCustomerName,
+  ] = useState("");
+
+  const [
+    paymentMethod,
+    setPaymentMethod,
+  ] = useState<PaymentMethod>("cash");
+
+  const [search, setSearch] =
+    useState("");
+
+  const [
+    scannerOpen,
+    setScannerOpen,
+  ] = useState(false);
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [
+    submitting,
+    setSubmitting,
+  ] = useState(false);
+
   const [message, setMessage] =
     useState("");
 
   const [error, setError] =
     useState("");
 
-  useEffect(() => {
-    const currentUser = getCurrentUser();
+  async function loadData() {
+    setError("");
 
-    if (!currentUser) {
-      return;
+    try {
+      const currentUser =
+        await hydrateCurrentUser();
+
+      if (!currentUser) {
+        setLoading(false);
+        return;
+      }
+
+      if (!currentUser.businessId) {
+        setError(
+          "Your account is not connected to a business.",
+        );
+        setLoading(false);
+        return;
+      }
+
+      setUser(currentUser);
+
+      setBusinessId(
+        currentUser.businessId,
+      );
+
+      const {
+        data: business,
+        error: businessError,
+      } = await supabase
+        .from("businesses")
+        .select(
+          "id, name, status",
+        )
+        .eq(
+          "id",
+          currentUser.businessId,
+        )
+        .maybeSingle();
+
+      if (businessError) {
+        throw new Error(
+          businessError.message,
+        );
+      }
+
+      if (!business) {
+        throw new Error(
+          "Your business could not be found.",
+        );
+      }
+
+      setBusinessName(
+        business.name,
+      );
+
+      setBusinessStatus(
+        business.status,
+      );
+
+      const {
+        data: productRows,
+        error: productError,
+      } = await supabase
+        .from("products")
+        .select(
+          "id, business_id, name, barcode, category, quantity, unit, buying_price, selling_price",
+        )
+        .eq(
+          "business_id",
+          currentUser.businessId,
+        )
+        .order("name", {
+          ascending: true,
+        });
+
+      if (productError) {
+        throw new Error(
+          productError.message,
+        );
+      }
+
+      setProducts(
+        (
+          (productRows ??
+            []) as DatabaseProduct[]
+        ).map(mapProduct),
+      );
+
+      /*
+       * Load the packaging
+       * configuration for this
+       * business.
+       */
+      const {
+        data: packagingRows,
+        error: packagingError,
+      } = await supabase
+        .from("packaging_configs")
+        .select(
+          "product_id, base_unit, factors",
+        )
+        .eq(
+          "business_id",
+          currentUser.businessId,
+        );
+
+      if (packagingError) {
+        throw new Error(
+          packagingError.message,
+        );
+      }
+
+      const packagingMap: Record<
+        string,
+        PackagingConfig
+      > = {};
+
+      (
+        packagingRows ?? []
+      ).forEach((row) => {
+        const config =
+          mapPackagingConfig(
+            row as DatabasePackagingConfig,
+          );
+
+        packagingMap[
+          config.productId
+        ] = config;
+      });
+
+      setPackagingConfigs(
+        packagingMap,
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load sales data.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadData();
+  }, []);
+
+  const selectedProduct =
+    useMemo(
+      () =>
+        products.find(
+          (product) =>
+            product.id ===
+            selectedProductId,
+        ),
+      [
+        products,
+        selectedProductId,
+      ],
+    );
+
+  const selectedPackaging =
+    selectedProduct
+      ? packagingConfigs[
+          selectedProduct.id
+        ]
+      : undefined;
+
+  /*
+   * Build the units available
+   * for the selected product.
+   *
+   * The base unit is always
+   * available.
+   *
+   * Additional units come from
+   * packaging_configs.
+   */
+  const saleUnits = useMemo(() => {
+    if (!selectedProduct) {
+      return [];
     }
 
-    setUser(currentUser);
+    const units: {
+      unit: string;
+      factor: number;
+    }[] = [
+      {
+        unit:
+          selectedProduct.unit,
+        factor: 1,
+      },
+    ];
 
-    let currentBusiness: Business | null = null;
+    if (
+      selectedPackaging &&
+      selectedPackaging.baseUnit ===
+        selectedProduct.unit
+    ) {
+      for (const [
+        unit,
+        factor,
+      ] of Object.entries(
+        selectedPackaging.factors,
+      )) {
+        if (
+          unit ===
+          selectedProduct.unit
+        ) {
+          continue;
+        }
 
-    if (currentUser.role === "owner") {
-      currentBusiness =
-        getBusinessByOwnerUserId(
-          currentUser.id,
-        );
-    } else {
-      const storedBusinessId =
-        localStorage.getItem(
-          "rwanda-inventory-current-business",
-        );
+        if (
+          !Number.isFinite(
+            factor,
+          ) ||
+          factor <= 0
+        ) {
+          continue;
+        }
 
-      if (storedBusinessId) {
-        currentBusiness =
-          getBusinessById(
-            storedBusinessId,
-          );
+        units.push({
+          unit,
+          factor,
+        });
       }
     }
 
-    setBusiness(currentBusiness);
-
-    function loadProducts() {
-      setProducts(getProducts());
-    }
-
-    loadProducts();
-
-    const unsubscribe =
-      subscribeToProducts(loadProducts);
-
-    return unsubscribe;
-  }, []);
-
-  const selectedProduct = useMemo(() => {
-    return products.find(
-      (product) =>
-        product.id === selectedProductId,
-    );
+    return units;
   }, [
-    products,
-    selectedProductId,
+    selectedProduct,
+    selectedPackaging,
   ]);
+
+  /*
+   * Conversion factor from the
+   * selected sale unit to the
+   * product base unit.
+   */
+  const selectedConversion =
+    useMemo(() => {
+      if (!selectedProduct) {
+        return 1;
+      }
+
+      if (
+        selectedUnit ===
+        selectedProduct.unit
+      ) {
+        return 1;
+      }
+
+      if (
+        !selectedPackaging ||
+        selectedPackaging.baseUnit !==
+          selectedProduct.unit
+      ) {
+        return 1;
+      }
+
+      const factor =
+        selectedPackaging.factors[
+          selectedUnit
+        ];
+
+      return Number.isFinite(
+        factor,
+      ) && factor > 0
+        ? factor
+        : 1;
+    }, [
+      selectedProduct,
+      selectedUnit,
+      selectedPackaging,
+    ]);
+
+  /*
+   * Product stock is stored in
+   * the base unit.
+   *
+   * Convert it to the selected
+   * sale unit.
+   */
+  const availableSaleQuantity =
+    selectedProduct
+      ? selectedProduct.quantity /
+        selectedConversion
+      : 0;
+
+  /*
+   * Selling price is stored for
+   * the base unit.
+   *
+   * Therefore:
+   *
+   * package price =
+   * base price × conversion factor
+   */
+  const selectedUnitPrice =
+    selectedProduct
+      ? selectedProduct.sellingPrice *
+        selectedConversion
+      : 0;
+
+  const selectedBuyingPrice =
+    selectedProduct
+      ? selectedProduct.buyingPrice *
+        selectedConversion
+      : 0;
+
+  const filteredProducts =
+    useMemo(() => {
+      const text =
+        search.trim().toLowerCase();
+
+      if (!text) {
+        return products;
+      }
+
+      return products.filter(
+        (product) =>
+          product.name
+            .toLowerCase()
+            .includes(text) ||
+          product.barcode
+            .toLowerCase()
+            .includes(text) ||
+          product.category
+            .toLowerCase()
+            .includes(text),
+      );
+    }, [products, search]);
+
+  const total = useMemo(
+    () =>
+      cart.reduce(
+        (sum, item) =>
+          sum + item.total,
+        0,
+      ),
+    [cart],
+  );
+
+  const totalCost = useMemo(
+    () =>
+      cart.reduce(
+        (sum, item) =>
+          sum +
+          item.buyingPrice *
+            item.quantity,
+        0,
+      ),
+    [cart],
+  );
+
+  const totalProfit =
+    total - totalCost;
+
+  function selectProduct(
+    product: Product,
+  ) {
+    setSelectedProductId(
+      product.id,
+    );
+
+    setSelectedUnit(
+      product.unit,
+    );
+
+    setQuantity("1");
+
+    setError("");
+    setMessage("");
+  }
 
   function addToCart() {
     setError("");
@@ -115,6 +666,13 @@ function RecordSaleContent() {
     if (!selectedProduct) {
       setError(
         "Please select a product.",
+      );
+      return;
+    }
+
+    if (!selectedUnit) {
+      setError(
+        "Please select a sale unit.",
       );
       return;
     }
@@ -129,26 +687,51 @@ function RecordSaleContent() {
       requestedQuantity <= 0
     ) {
       setError(
-        "Please enter a valid quantity.",
+        "Please enter a valid quantity greater than zero.",
       );
       return;
     }
 
     if (
-      requestedQuantity >
-      selectedProduct.quantity
+      !unitAllowsFraction(
+        selectedUnit,
+      ) &&
+      !Number.isInteger(
+        requestedQuantity,
+      )
     ) {
       setError(
-        `Only ${selectedProduct.quantity} ${selectedProduct.unit} available in stock.`,
+        `${selectedUnit} must be sold as a whole number.`,
       );
       return;
     }
 
-    const existingItem = cart.find(
-      (item) =>
-        item.productId ===
-        selectedProduct.id,
-    );
+    /*
+     * Make sure the selected unit
+     * is configured.
+     */
+    const validUnit =
+      saleUnits.some(
+        (item) =>
+          item.unit ===
+          selectedUnit,
+      );
+
+    if (!validUnit) {
+      setError(
+        `${selectedUnit} is not configured for this product.`,
+      );
+      return;
+    }
+
+    const existingItem =
+      cart.find(
+        (item) =>
+          item.productId ===
+            selectedProduct.id &&
+          item.unit ===
+            selectedUnit,
+      );
 
     const newQuantity =
       existingItem
@@ -158,111 +741,70 @@ function RecordSaleContent() {
 
     if (
       newQuantity >
-      selectedProduct.quantity
+      availableSaleQuantity
     ) {
       setError(
-        `You cannot sell more than ${selectedProduct.quantity} ${selectedProduct.unit} of ${selectedProduct.name}.`,
+        `Only ${formatQuantity(
+          availableSaleQuantity,
+        )} ${selectedUnit} of ${selectedProduct.name} is available.`,
       );
       return;
     }
 
-    const sellingPrice =
-      selectedProduct.sellingPrice;
+    const newItem: CartItem = {
+      productId:
+        selectedProduct.id,
 
-    const buyingPrice =
-      selectedProduct.buyingPrice;
+      productName:
+        selectedProduct.name,
 
-    const total =
-      newQuantity * sellingPrice;
+      quantity:
+        newQuantity,
 
-    const profit =
-      (sellingPrice - buyingPrice) *
-      newQuantity;
+      unit:
+        selectedUnit,
+
+      unitPrice:
+        selectedUnitPrice,
+
+      buyingPrice:
+        selectedBuyingPrice,
+
+      total:
+        newQuantity *
+        selectedUnitPrice,
+    };
 
     if (existingItem) {
       setCart(
         cart.map((item) =>
           item.productId ===
-          selectedProduct.id
-            ? {
-                ...item,
-                quantity:
-                  newQuantity,
-                unitPrice:
-                  sellingPrice,
-                buyingPrice:
-                  buyingPrice,
-                sellingPrice:
-                  sellingPrice,
-                total:
-                  total,
-                profit:
-                  profit,
-              }
+            selectedProduct.id &&
+          item.unit ===
+            selectedUnit
+            ? newItem
             : item,
         ),
       );
     } else {
-      const item: CartItem = {
-        productId:
-          selectedProduct.id,
-
-        productName:
-          selectedProduct.name,
-
-        quantity:
-          requestedQuantity,
-
-        unit:
-          selectedProduct.unit,
-
-        unitPrice:
-          sellingPrice,
-
-        buyingPrice:
-          buyingPrice,
-
-        sellingPrice:
-          sellingPrice,
-
-        total:
-          requestedQuantity *
-          sellingPrice,
-
-        profit:
-          (sellingPrice -
-            buyingPrice) *
-          requestedQuantity,
-      };
-
       setCart([
         ...cart,
-        item,
+        newItem,
       ]);
     }
 
     setSelectedProductId("");
+    setSelectedUnit("");
     setQuantity("1");
-  }
-
-  function removeFromCart(
-    productId: string,
-  ) {
-    setCart(
-      cart.filter(
-        (item) =>
-          item.productId !==
-          productId,
-      ),
-    );
   }
 
   function updateCartQuantity(
     productId: string,
-    newValue: string,
+    unit: string,
+    value: string,
   ) {
     const newQuantity =
-      Number(newValue);
+      Number(value);
 
     if (
       !Number.isFinite(
@@ -273,85 +815,155 @@ function RecordSaleContent() {
       return;
     }
 
-    const product = products.find(
-      (item) =>
-        item.id === productId,
-    );
+    const product =
+      products.find(
+        (item) =>
+          item.id === productId,
+      );
 
     if (!product) {
       return;
     }
 
+    const config =
+      packagingConfigs[
+        product.id
+      ];
+
+    let conversion = 1;
+
+    if (
+      unit !== product.unit &&
+      config &&
+      config.baseUnit ===
+        product.unit
+    ) {
+      const factor =
+        config.factors[unit];
+
+      if (
+        Number.isFinite(
+          factor,
+        ) &&
+        factor > 0
+      ) {
+        conversion = factor;
+      }
+    }
+
+    const available =
+      product.quantity /
+      conversion;
+
     if (
       newQuantity >
-      product.quantity
+      available
     ) {
       setError(
-        `Only ${product.quantity} ${product.unit} available for ${product.name}.`,
+        `Only ${formatQuantity(
+          available,
+        )} ${unit} of ${product.name} is available.`,
       );
       return;
     }
 
     setError("");
 
-    const sellingPrice =
-      product.sellingPrice;
-
-    const buyingPrice =
+    const productBaseBuyingPrice =
       product.buyingPrice;
 
-    const total =
-      newQuantity * sellingPrice;
+    const productBaseSellingPrice =
+      product.sellingPrice;
 
-    const profit =
-      (sellingPrice - buyingPrice) *
-      newQuantity;
+    const unitPrice =
+      productBaseSellingPrice *
+      conversion;
+
+    const buyingPrice =
+      productBaseBuyingPrice *
+      conversion;
 
     setCart(
       cart.map((item) =>
         item.productId ===
-        productId
+          productId &&
+        item.unit === unit
           ? {
               ...item,
               quantity:
                 newQuantity,
-              unitPrice:
-                sellingPrice,
-              buyingPrice:
-                buyingPrice,
-              sellingPrice:
-                sellingPrice,
+              unitPrice,
+              buyingPrice,
               total:
-                total,
-              profit:
-                profit,
+                newQuantity *
+                unitPrice,
             }
           : item,
       ),
     );
   }
 
-  const total = cart.reduce(
-    (sum, item) =>
-      sum + item.total,
-    0,
-  );
+  function removeFromCart(
+    productId: string,
+    unit: string,
+  ) {
+    setCart(
+      cart.filter(
+        (item) =>
+          !(
+            item.productId ===
+              productId &&
+            item.unit === unit
+          ),
+      ),
+    );
+  }
 
-  const totalProfit = cart.reduce(
-    (sum, item) =>
-      sum + (item.profit ?? 0),
-    0,
-  );
+  function handleBarcodeScan(
+    barcode: string,
+  ) {
+    const cleanBarcode =
+      barcode.trim();
 
-  const totalCost = cart.reduce(
-    (sum, item) =>
-      sum +
-      (item.buyingPrice ?? 0) *
-        item.quantity,
-    0,
-  );
+    if (!cleanBarcode) {
+      setError(
+        "The scanner did not return a valid barcode.",
+      );
+      setScannerOpen(false);
+      return;
+    }
 
-  function completeSale() {
+    const product =
+      products.find(
+        (item) =>
+          item.barcode.trim() ===
+          cleanBarcode,
+      );
+
+    if (!product) {
+      setError(
+        `No product was found with barcode ${cleanBarcode}.`,
+      );
+      setScannerOpen(false);
+      return;
+    }
+
+    selectProduct(product);
+
+    setSearch(product.name);
+
+    setQuantity("1");
+
+    setError("");
+
+    setMessage(
+      `${product.name} selected.`,
+    );
+
+    setScannerOpen(false);
+  }
+
+  async function completeSale() {
     setError("");
     setMessage("");
 
@@ -362,7 +974,7 @@ function RecordSaleContent() {
       return;
     }
 
-    if (!business) {
+    if (!businessId) {
       setError(
         "Your account is not connected to a business.",
       );
@@ -370,7 +982,7 @@ function RecordSaleContent() {
     }
 
     if (
-      business.status !==
+      businessStatus !==
       "active"
     ) {
       setError(
@@ -381,85 +993,90 @@ function RecordSaleContent() {
 
     if (cart.length === 0) {
       setError(
-        "Please add at least one product to the sale.",
+        "Add at least one product to the sale.",
       );
       return;
     }
 
-    /*
-     * Check stock one more time before
-     * completing the sale.
-     */
-    for (const item of cart) {
-      const currentProduct =
-        products.find(
-          (product) =>
-            product.id ===
+    setSubmitting(true);
+
+    try {
+      const items = cart.map(
+        (item) => ({
+          product_id:
             item.productId,
-        );
 
-      if (!currentProduct) {
-        setError(
-          `${item.productName} no longer exists.`,
+          quantity:
+            item.quantity,
+
+          unit:
+            item.unit,
+
+          unit_price:
+            item.unitPrice,
+        }),
+      );
+
+      const {
+        data: sale,
+        error: saleError,
+      } = await supabase.rpc(
+        "record_sale",
+        {
+          p_business_id:
+            businessId,
+
+          p_payment_method:
+            paymentMethod,
+
+          p_customer_name:
+            customerName.trim() ||
+            null,
+
+          p_items: items,
+        },
+      );
+
+      if (saleError) {
+        throw new Error(
+          saleError.message ||
+            "The sale could not be recorded.",
         );
-        return;
       }
 
-      if (
-        item.quantity >
-        currentProduct.quantity
-      ) {
-        setError(
-          `Not enough stock for ${item.productName}. Available: ${currentProduct.quantity} ${currentProduct.unit}.`,
+      if (!sale) {
+        throw new Error(
+          "The sale was not returned by Supabase.",
         );
-        return;
       }
-    }
 
-    const sale = createSale({
-      businessId:
-        business.id,
-      items: cart,
-    });
+      setCart([]);
+      setSelectedProductId("");
+      setSelectedUnit("");
+      setQuantity("1");
+      setCustomerName("");
 
-    if (!sale) {
+      setMessage(
+        `Sale recorded successfully. Total: ${formatRwf(
+          Number(
+            sale.total_amount,
+          ),
+        )} RWF.`,
+      );
+
+      await loadData();
+    } catch (err) {
       setError(
-        "The sale could not be recorded.",
+        err instanceof Error
+          ? err.message
+          : "Unable to record the sale.",
       );
-      return;
+    } finally {
+      setSubmitting(false);
     }
-
-    /*
-     * Deduct sold quantities from stock.
-     */
-    for (const item of cart) {
-      const currentProduct =
-        products.find(
-          (product) =>
-            product.id ===
-            item.productId,
-        );
-
-      if (!currentProduct) {
-        continue;
-      }
-
-      adjustProductQuantity(
-        currentProduct.id,
-        -item.quantity,
-      );
-    }
-
-    setCart([]);
-    setSelectedProductId("");
-    setQuantity("1");
-
-    setMessage(
-      `Sale recorded successfully. Total: ${sale.total.toLocaleString()} RWF. Profit: ${sale.profit?.toLocaleString() ?? "0"} RWF`,
-    );
   }
 
-  if (!user) {
+  if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-100">
         <p className="text-gray-600">
@@ -479,31 +1096,30 @@ function RecordSaleContent() {
             </h1>
 
             <p className="mt-1 text-sm text-gray-500">
-              {business
-                ? business.businessName
-                : "RwandaInventory"}
+              {businessName ||
+                "RwandaInventory"}
             </p>
           </div>
 
           <Link
-            href="/"
+            href="/sales"
             className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
           >
-            Dashboard
+            Sales
           </Link>
         </div>
       </header>
 
       <div className="mx-auto max-w-6xl px-6 py-8">
-        {message && (
-          <div className="mb-6 rounded-xl border border-green-200 bg-green-50 p-4 text-green-800">
-            {message}
+        {error && (
+          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+            {error}
           </div>
         )}
 
-        {error && (
-          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-red-800">
-            {error}
+        {message && (
+          <div className="mb-6 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-800">
+            {message}
           </div>
         )}
 
@@ -513,10 +1129,44 @@ function RecordSaleContent() {
               Add Products
             </h2>
 
-            <p className="mt-1 text-sm text-gray-500">
-              Select a product and enter the quantity
-              being sold.
-            </p>
+            <div className="mt-6 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() =>
+                  setScannerOpen(
+                    true,
+                  )
+                }
+                disabled={
+                  scannerOpen
+                }
+                className="rounded-lg bg-black px-4 py-3 font-medium text-white disabled:opacity-50"
+              >
+                Scan Barcode
+              </button>
+
+              <Link
+                href="/products/add"
+                className="rounded-lg border border-gray-300 px-4 py-3 font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Add Product
+              </Link>
+            </div>
+
+            {scannerOpen && (
+              <div className="mt-5">
+                <BarcodeScanner
+                  onScan={
+                    handleBarcodeScan
+                  }
+                  onClose={() =>
+                    setScannerOpen(
+                      false,
+                    )
+                  }
+                />
+              </div>
+            )}
 
             <div className="mt-6 grid gap-4 sm:grid-cols-3">
               <div className="sm:col-span-2">
@@ -528,18 +1178,38 @@ function RecordSaleContent() {
                   value={
                     selectedProductId
                   }
-                  onChange={(event) =>
-                    setSelectedProductId(
-                      event.target.value,
-                    )
-                  }
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
+                  onChange={(event) => {
+                    const product =
+                      products.find(
+                        (item) =>
+                          item.id ===
+                          event.target
+                            .value,
+                      );
+
+                    if (product) {
+                      selectProduct(
+                        product,
+                      );
+                    } else {
+                      setSelectedProductId(
+                        "",
+                      );
+                      setSelectedUnit(
+                        "",
+                      );
+                      setQuantity(
+                        "1",
+                      );
+                    }
+                  }}
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
                 >
                   <option value="">
                     Select a product
                   </option>
 
-                  {products.map(
+                  {filteredProducts.map(
                     (product) => (
                       <option
                         key={
@@ -549,16 +1219,13 @@ function RecordSaleContent() {
                           product.id
                         }
                       >
-                        {product.name} —
-                        Stock:{" "}
-                        {
-                          product.quantity
-                        }{" "}
+                        {product.name} —{" "}
+                        {formatQuantity(
+                          product.quantity,
+                        )}{" "}
                         {
                           product.unit
-                        } —{" "}
-                        {product.sellingPrice.toLocaleString()}{" "}
-                        RWF
+                        }
                       </option>
                     ),
                   )}
@@ -567,33 +1234,87 @@ function RecordSaleContent() {
 
               <div>
                 <label className="mb-2 block text-sm font-medium text-gray-700">
-                  Quantity
+                  Sale Unit
                 </label>
 
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={quantity}
-                  onChange={(event) =>
-                    setQuantity(
-                      event.target.value,
-                    )
+                <select
+                  value={
+                    selectedUnit
                   }
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
-                />
+                  onChange={(event) => {
+                    setSelectedUnit(
+                      event.target
+                        .value,
+                    );
+                    setQuantity("1");
+                    setError("");
+                    setMessage("");
+                  }}
+                  disabled={
+                    !selectedProduct
+                  }
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 disabled:bg-gray-100"
+                >
+                  {!selectedProduct && (
+                    <option value="">
+                      Select product first
+                    </option>
+                  )}
+
+                  {saleUnits.map(
+                    ({
+                      unit,
+                      factor,
+                    }) => (
+                      <option
+                        key={unit}
+                        value={unit}
+                      >
+                        {unit}
+                        {factor !==
+                        1
+                          ? ` — 1 ${unit} = ${formatQuantity(
+                              factor,
+                            )} ${
+                              selectedProduct?.unit ??
+                              ""
+                            }`
+                          : ""}
+                      </option>
+                    ),
+                  )}
+                </select>
               </div>
             </div>
 
+            <div className="mt-4">
+              <label className="mb-2 block text-sm font-medium text-gray-700">
+                Search Products
+              </label>
+
+              <input
+                type="text"
+                value={search}
+                onChange={(event) =>
+                  setSearch(
+                    event.target
+                      .value,
+                  )
+                }
+                placeholder="Search products..."
+                className="w-full rounded-lg border border-gray-300 px-4 py-3"
+              />
+            </div>
+
             {selectedProduct && (
-              <div className="mt-4 rounded-xl bg-gray-50 p-4">
-                <div className="grid gap-3 sm:grid-cols-4">
+              <div className="mt-5 rounded-xl bg-gray-50 p-5">
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                   <div>
                     <p className="text-xs text-gray-500">
                       Product
                     </p>
 
-                    <p className="font-semibold text-gray-900">
+                    <p className="font-semibold">
                       {
                         selectedProduct.name
                       }
@@ -602,13 +1323,13 @@ function RecordSaleContent() {
 
                   <div>
                     <p className="text-xs text-gray-500">
-                      Available Stock
+                      Base Stock
                     </p>
 
-                    <p className="font-semibold text-gray-900">
-                      {
-                        selectedProduct.quantity
-                      }{" "}
+                    <p className="font-semibold">
+                      {formatQuantity(
+                        selectedProduct.quantity,
+                      )}{" "}
                       {
                         selectedProduct.unit
                       }
@@ -617,12 +1338,16 @@ function RecordSaleContent() {
 
                   <div>
                     <p className="text-xs text-gray-500">
-                      Buying Price
+                      Available
                     </p>
 
-                    <p className="font-semibold text-gray-900">
-                      {selectedProduct.buyingPrice.toLocaleString()}{" "}
-                      RWF
+                    <p className="font-semibold">
+                      {formatQuantity(
+                        availableSaleQuantity,
+                      )}{" "}
+                      {
+                        selectedUnit
+                      }
                     </p>
                   </div>
 
@@ -631,29 +1356,105 @@ function RecordSaleContent() {
                       Selling Price
                     </p>
 
-                    <p className="font-semibold text-gray-900">
-                      {selectedProduct.sellingPrice.toLocaleString()}{" "}
-                      RWF
+                    <p className="font-semibold">
+                      {formatRwf(
+                        selectedUnitPrice,
+                      )}{" "}
+                      RWF /{" "}
+                      {
+                        selectedUnit
+                      }
                     </p>
                   </div>
                 </div>
+
+                {selectedConversion !==
+                  1 && (
+                  <p className="mt-4 text-sm text-gray-600">
+                    1{" "}
+                    {
+                      selectedUnit
+                    }{" "}
+                    ={" "}
+                    {formatQuantity(
+                      selectedConversion,
+                    )}{" "}
+                    {
+                      selectedProduct.unit
+                    }
+                  </p>
+                )}
+
+                <p className="mt-2 text-sm text-gray-500">
+                  Base buying price:{" "}
+                  {formatRwf(
+                    selectedProduct.buyingPrice,
+                  )}{" "}
+                  RWF /{" "}
+                  {
+                    selectedProduct.unit
+                  }
+                </p>
               </div>
             )}
 
+            <div className="mt-5">
+              <label className="mb-2 block text-sm font-medium text-gray-700">
+                Quantity
+              </label>
+
+              <input
+                type="number"
+                min="0"
+                step={
+                  selectedUnit &&
+                  unitAllowsFraction(
+                    selectedUnit,
+                  )
+                    ? "any"
+                    : "1"
+                }
+                value={quantity}
+                onChange={(event) =>
+                  setQuantity(
+                    event.target
+                      .value,
+                  )
+                }
+                className="w-full rounded-lg border border-gray-300 px-4 py-3"
+              />
+
+              {selectedProduct &&
+                selectedUnit && (
+                  <p className="mt-2 text-xs text-gray-500">
+                    Available:{" "}
+                    {formatQuantity(
+                      availableSaleQuantity,
+                    )}{" "}
+                    {
+                      selectedUnit
+                    }
+                  </p>
+                )}
+            </div>
+
             <button
               type="button"
-              onClick={addToCart}
+              onClick={
+                addToCart
+              }
               className="mt-5 rounded-lg bg-black px-5 py-3 font-medium text-white hover:bg-gray-800"
             >
               Add to Sale
             </button>
 
             <div className="mt-8">
-              <h3 className="text-lg font-bold text-gray-900">
+              <h3 className="text-lg font-bold">
                 Current Sale
               </h3>
 
-              {cart.length === 0 ? (
+              {cart.length ===
+              0 ? (
                 <div className="mt-4 rounded-xl border border-dashed border-gray-300 p-8 text-center text-gray-500">
                   No products added
                   yet.
@@ -668,19 +1469,15 @@ function RecordSaleContent() {
                         </th>
 
                         <th className="px-3 py-3">
-                          Buying
+                          Unit
                         </th>
 
                         <th className="px-3 py-3">
-                          Selling
+                          Price
                         </th>
 
                         <th className="px-3 py-3">
                           Quantity
-                        </th>
-
-                        <th className="px-3 py-3">
-                          Profit
                         </th>
 
                         <th className="px-3 py-3">
@@ -697,38 +1494,39 @@ function RecordSaleContent() {
                       {cart.map(
                         (item) => (
                           <tr
-                            key={
-                              item.productId
-                            }
+                            key={`${item.productId}-${item.unit}`}
                             className="border-b"
                           >
-                            <td className="px-3 py-4 font-medium text-gray-900">
+                            <td className="px-3 py-4 font-medium">
                               {
                                 item.productName
                               }
                             </td>
 
                             <td className="px-3 py-4">
-                              {(
-                                item.buyingPrice ??
-                                0
-                              ).toLocaleString()}{" "}
-                              RWF
+                              {
+                                item.unit
+                              }
                             </td>
 
                             <td className="px-3 py-4">
-                              {(
-                                item.sellingPrice ??
-                                item.unitPrice
-                              ).toLocaleString()}{" "}
+                              {formatRwf(
+                                item.unitPrice,
+                              )}{" "}
                               RWF
                             </td>
 
                             <td className="px-3 py-4">
                               <input
                                 type="number"
-                                min="1"
-                                step="1"
+                                min="0"
+                                step={
+                                  unitAllowsFraction(
+                                    item.unit,
+                                  )
+                                    ? "any"
+                                    : "1"
+                                }
                                 value={
                                   item.quantity
                                 }
@@ -737,6 +1535,7 @@ function RecordSaleContent() {
                                 ) =>
                                   updateCartQuantity(
                                     item.productId,
+                                    item.unit,
                                     event
                                       .target
                                       .value,
@@ -746,16 +1545,10 @@ function RecordSaleContent() {
                               />
                             </td>
 
-                            <td className="px-3 py-4 font-semibold text-green-700">
-                              {(
-                                item.profit ??
-                                0
-                              ).toLocaleString()}{" "}
-                              RWF
-                            </td>
-
                             <td className="px-3 py-4 font-semibold">
-                              {item.total.toLocaleString()}{" "}
+                              {formatRwf(
+                                item.total,
+                              )}{" "}
                               RWF
                             </td>
 
@@ -765,9 +1558,10 @@ function RecordSaleContent() {
                                 onClick={() =>
                                   removeFromCart(
                                     item.productId,
+                                    item.unit,
                                   )
                                 }
-                                className="text-sm font-medium text-red-600 hover:text-red-800"
+                                className="text-sm font-medium text-red-600"
                               >
                                 Remove
                               </button>
@@ -783,49 +1577,112 @@ function RecordSaleContent() {
           </section>
 
           <aside className="h-fit rounded-2xl bg-white p-6 shadow-sm">
-            <h2 className="text-xl font-bold text-gray-900">
+            <h2 className="text-xl font-bold">
               Sale Summary
             </h2>
 
             <div className="mt-6 space-y-4">
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-500">
-                  Items
-                </span>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">
+                  Customer Name
+                </label>
 
-                <span className="font-medium text-gray-900">
-                  {cart.length}
-                </span>
+                <input
+                  type="text"
+                  value={
+                    customerName
+                  }
+                  onChange={(event) =>
+                    setCustomerName(
+                      event.target
+                        .value,
+                    )
+                  }
+                  placeholder="Optional"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-3"
+                />
               </div>
 
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-500">
-                  Cost of Goods
-                </span>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">
+                  Payment Method
+                </label>
 
-                <span className="font-medium text-gray-900">
-                  {totalCost.toLocaleString()} RWF
-                </span>
-              </div>
-
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-500">
-                  Gross Profit
-                </span>
-
-                <span className="font-semibold text-green-700">
-                  {totalProfit.toLocaleString()} RWF
-                </span>
+                <select
+                  value={
+                    paymentMethod
+                  }
+                  onChange={(event) =>
+                    setPaymentMethod(
+                      event.target
+                        .value as PaymentMethod,
+                    )
+                  }
+                  className="w-full rounded-lg border border-gray-300 px-3 py-3"
+                >
+                  {paymentMethods.map(
+                    (method) => (
+                      <option
+                        key={
+                          method.value
+                        }
+                        value={
+                          method.value
+                        }
+                      >
+                        {
+                          method.label
+                        }
+                      </option>
+                    ),
+                  )}
+                </select>
               </div>
 
               <div className="border-t pt-4">
-                <div className="flex justify-between">
-                  <span className="text-lg font-semibold text-gray-900">
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-500">
+                    Items
+                  </span>
+
+                  <span className="font-medium">
+                    {cart.length}
+                  </span>
+                </div>
+
+                <div className="mt-3 flex justify-between text-sm">
+                  <span className="text-gray-500">
+                    Cost
+                  </span>
+
+                  <span className="font-medium">
+                    {formatRwf(
+                      totalCost,
+                    )}{" "}
+                    RWF
+                  </span>
+                </div>
+
+                <div className="mt-3 flex justify-between text-sm">
+                  <span className="text-gray-500">
+                    Gross Profit
+                  </span>
+
+                  <span className="font-semibold text-green-700">
+                    {formatRwf(
+                      totalProfit,
+                    )}{" "}
+                    RWF
+                  </span>
+                </div>
+
+                <div className="mt-4 flex justify-between border-t pt-4">
+                  <span className="text-lg font-semibold">
                     Total
                   </span>
 
-                  <span className="text-2xl font-bold text-gray-900">
-                    {total.toLocaleString()}{" "}
+                  <span className="text-2xl font-bold">
+                    {formatRwf(total)}{" "}
                     RWF
                   </span>
                 </div>
@@ -834,13 +1691,18 @@ function RecordSaleContent() {
 
             <button
               type="button"
-              onClick={completeSale}
-              disabled={
-                cart.length === 0
+              onClick={() =>
+                void completeSale()
               }
-              className="mt-6 w-full rounded-lg bg-black px-5 py-3 font-semibold text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300"
+              disabled={
+                cart.length === 0 ||
+                submitting
+              }
+              className="mt-6 w-full rounded-lg bg-black px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-300"
             >
-              Complete Sale
+              {submitting
+                ? "Recording Sale..."
+                : "Complete Sale"}
             </button>
 
             <Link

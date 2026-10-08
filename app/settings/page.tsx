@@ -1,6 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import {
+  FormEvent,
+  useEffect,
+  useState,
+} from "react";
 import Link from "next/link";
 
 import {
@@ -8,16 +12,36 @@ import {
   type User,
 } from "@/app/lib/auth";
 
-import {
-  getBusinessByOwnerUserId,
-  updateBusiness,
-  type Business,
-} from "@/app/lib/businesses";
-
 import PermissionGuard from "@/app/components/PermissionGuard";
 
+import { supabase } from "@/app/lib/supabase";
+
+type BusinessStatus =
+  | "pending"
+  | "active"
+  | "rejected"
+  | "suspended";
+
+type PaymentStatus =
+  | "pending"
+  | "paid"
+  | "overdue";
+
+type Business = {
+  id: string;
+  name: string;
+  status: BusinessStatus;
+  payment_status: PaymentStatus;
+  plan: string;
+  subscription_start_date: string | null;
+  subscription_end_date: string | null;
+  created_at: string;
+};
+
 function SettingsContent() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] =
+    useState<User | null>(null);
+
   const [business, setBusiness] =
     useState<Business | null>(null);
 
@@ -33,33 +57,90 @@ function SettingsContent() {
   const [loading, setLoading] =
     useState(true);
 
-  useEffect(() => {
-    const currentUser = getCurrentUser();
+  const [saving, setSaving] =
+    useState(false);
 
-    if (!currentUser) {
-      setLoading(false);
-      return;
-    }
+  async function loadBusiness() {
+    setError("");
 
-    setUser(currentUser);
+    try {
+      const currentUser =
+        getCurrentUser();
 
-    const currentBusiness =
-      getBusinessByOwnerUserId(
-        currentUser.id,
+      if (!currentUser) {
+        setLoading(false);
+        return;
+      }
+
+      if (!currentUser.businessId) {
+        throw new Error(
+          "Your account is not connected to a business.",
+        );
+      }
+
+      setUser(currentUser);
+
+      const {
+        data,
+        error: businessError,
+      } = await supabase
+        .from("businesses")
+        .select(
+          `
+            id,
+            name,
+            status,
+            payment_status,
+            plan,
+            subscription_start_date,
+            subscription_end_date,
+            created_at
+          `,
+        )
+        .eq(
+          "id",
+          currentUser.businessId,
+        )
+        .maybeSingle();
+
+      if (businessError) {
+        throw new Error(
+          businessError.message,
+        );
+      }
+
+      if (!data) {
+        throw new Error(
+          "Your business could not be found.",
+        );
+      }
+
+      const loadedBusiness =
+        data as Business;
+
+      setBusiness(
+        loadedBusiness,
       );
 
-    setBusiness(currentBusiness);
-
-    if (currentBusiness) {
       setBusinessName(
-        currentBusiness.businessName,
+        loadedBusiness.name,
       );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load business settings.",
+      );
+    } finally {
+      setLoading(false);
     }
+  }
 
-    setLoading(false);
+  useEffect(() => {
+    void loadBusiness();
   }, []);
 
-  function handleSubmit(
+  async function handleSubmit(
     event: FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
@@ -84,35 +165,88 @@ function SettingsContent() {
       return;
     }
 
-    const updatedBusiness =
-      updateBusiness(
-        business.id,
-        {
-          businessName:
-            cleanBusinessName,
-        },
-      );
-
-    if (!updatedBusiness) {
-      setError(
-        "The business information could not be updated.",
+    if (
+      cleanBusinessName ===
+      business.name
+    ) {
+      setSuccess(
+        "No changes were made.",
       );
       return;
     }
 
-    setBusiness(updatedBusiness);
+    setSaving(true);
 
-    setSuccess(
-      "Business information updated successfully.",
-    );
+    try {
+      const {
+        data: updatedBusiness,
+        error: updateError,
+      } =
+        await supabase
+          .from("businesses")
+          .update({
+            name: cleanBusinessName,
+          })
+          .eq(
+            "id",
+            business.id,
+          )
+          .select(
+            `
+              id,
+              name,
+              status,
+              payment_status,
+              plan,
+              subscription_start_date,
+              subscription_end_date,
+              created_at
+            `,
+          )
+          .maybeSingle();
+
+      if (updateError) {
+        throw new Error(
+          updateError.message,
+        );
+      }
+
+      if (!updatedBusiness) {
+        throw new Error(
+          "The business information could not be updated. You may not have permission to manage business settings.",
+        );
+      }
+
+      const updated =
+        updatedBusiness as Business;
+
+      setBusiness(updated);
+      setBusinessName(
+        updated.name,
+      );
+
+      setSuccess(
+        "Business information updated successfully.",
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "The business information could not be updated.",
+      );
+    } finally {
+      setSaving(false);
+    }
   }
 
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-100">
-        <p className="text-gray-600">
-          Loading settings...
-        </p>
+        <div className="rounded-2xl bg-white p-8 shadow-sm">
+          <p className="text-gray-600">
+            Loading settings...
+          </p>
+        </div>
       </main>
     );
   }
@@ -198,7 +332,8 @@ function SettingsContent() {
                       event.target.value,
                     )
                   }
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black"
+                  disabled={saving}
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-black disabled:bg-gray-100"
                   placeholder="Enter business name"
                 />
               </div>
@@ -217,9 +352,12 @@ function SettingsContent() {
 
               <button
                 type="submit"
-                className="w-full rounded-lg bg-black px-5 py-3 font-medium text-white hover:bg-gray-800"
+                disabled={saving}
+                className="w-full rounded-lg bg-black px-5 py-3 font-medium text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Save Changes
+                {saving
+                  ? "Saving..."
+                  : "Save Changes"}
               </button>
             </form>
           </section>
@@ -236,7 +374,7 @@ function SettingsContent() {
                 </p>
 
                 <p className="mt-1 font-semibold text-gray-900">
-                  {business.businessName}
+                  {business.name}
                 </p>
               </div>
 
@@ -266,7 +404,7 @@ function SettingsContent() {
                 </p>
 
                 <p className="mt-1 font-semibold capitalize text-gray-900">
-                  {business.paymentStatus}
+                  {business.payment_status}
                 </p>
               </div>
 
@@ -276,9 +414,9 @@ function SettingsContent() {
                 </p>
 
                 <p className="mt-1 font-semibold text-gray-900">
-                  {business.subscriptionEndDate
+                  {business.subscription_end_date
                     ? new Date(
-                        business.subscriptionEndDate,
+                        business.subscription_end_date,
                       ).toLocaleDateString()
                     : "Not active"}
                 </p>

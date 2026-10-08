@@ -6,43 +6,72 @@ import Link from "next/link";
 import PermissionGuard from "@/app/components/PermissionGuard";
 
 import {
-  getCurrentUser,
+  getCurrentBusiness,
+  hydrateCurrentUser,
+  type CachedBusiness,
   type User,
 } from "@/app/lib/auth";
-
-import {
-  getBusinessByOwnerUserId,
-  type Business,
-} from "@/app/lib/businesses";
 
 function SubscriptionContent() {
   const [user, setUser] =
     useState<User | null>(null);
 
   const [business, setBusiness] =
-    useState<Business | null>(null);
+    useState<CachedBusiness | null>(null);
 
   const [loading, setLoading] =
     useState(true);
 
   useEffect(() => {
-    const currentUser =
-      getCurrentUser();
+    let cancelled = false;
 
-    if (!currentUser) {
-      setLoading(false);
-      return;
+    async function loadSubscription() {
+      setLoading(true);
+
+      try {
+        const currentUser =
+          await hydrateCurrentUser();
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!currentUser) {
+          setLoading(false);
+          return;
+        }
+
+        setUser(currentUser);
+
+        const currentBusiness =
+          await getCurrentBusiness();
+
+        if (cancelled) {
+          return;
+        }
+
+        setBusiness(currentBusiness);
+      } catch (error) {
+        console.error(
+          "Failed to load subscription:",
+          error,
+        );
+
+        if (!cancelled) {
+          setBusiness(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     }
 
-    setUser(currentUser);
+    void loadSubscription();
 
-    const currentBusiness =
-      getBusinessByOwnerUserId(
-        currentUser.id,
-      );
-
-    setBusiness(currentBusiness);
-    setLoading(false);
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading) {
@@ -244,7 +273,7 @@ function SubscriptionContent() {
                 Payment Status
               </p>
 
-              <p className="mt-1 font-semibold capitalize text-gray-900">
+              <p className="mt-1 font-semibold text-gray-900">
                 {business.paymentStatus}
               </p>
             </div>

@@ -1,849 +1,976 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
 
 import {
-  approveBusiness,
-  getBusinesses,
-  rejectBusiness,
-  suspendBusiness,
-  updateBusiness,
-  type Business,
-} from "@/app/lib/businesses";
+  isPlatformAdmin,
+} from "@/app/lib/auth";
 
-import {
-  getAdminSession,
-  logoutAdmin,
-} from "@/app/lib/admin";
+import { supabase } from "@/app/lib/supabase";
 
-type StoredUser = {
+type BusinessStatus =
+  | "pending"
+  | "active"
+  | "rejected"
+  | "suspended"
+  | string;
+
+type PaymentStatus =
+  | "pending"
+  | "paid"
+  | "unpaid"
+  | string;
+
+type BusinessRecord = {
   id: string;
   name: string;
-  username: string;
-  password: string;
-  role: "owner" | "manager" | "staff" | "worker";
-  active: boolean;
-  createdAt: string;
+  phone: string | null;
+  address: string | null;
+  currency: string | null;
+  status: BusinessStatus;
+  payment_status: PaymentStatus | null;
+  plan: string | null;
+  subscription_start_date: string | null;
+  subscription_end_date: string | null;
+  created_at: string;
+  updated_at: string | null;
 };
 
-const USERS_STORAGE_KEY =
-  "rwanda-inventory-users";
+type FilterType =
+  | "all"
+  | "pending"
+  | "active"
+  | "rejected"
+  | "suspended";
 
 export default function AdminDashboardPage() {
   const router = useRouter();
 
   const [businesses, setBusinesses] =
-    useState<Business[]>([]);
-
-  const [selectedBusinessId, setSelectedBusinessId] =
-    useState<string | null>(null);
+    useState<BusinessRecord[]>([]);
 
   const [loading, setLoading] =
     useState(true);
 
-  useEffect(() => {
-    const session = getAdminSession();
+  const [actionLoading, setActionLoading] =
+    useState("");
 
-    if (!session) {
-      router.replace("/admin");
-      return;
-    }
+  const [error, setError] =
+    useState("");
 
-    loadBusinesses();
-    setLoading(false);
-  }, [router]);
+  const [success, setSuccess] =
+    useState("");
 
-  function loadBusinesses() {
-    setBusinesses(getBusinesses());
-  }
+  const [filter, setFilter] =
+    useState<FilterType>("all");
 
-  function activateBusinessOwner(
-    ownerUserId: string,
-  ) {
-    if (typeof window === "undefined") {
-      return;
-    }
+  const [selectedBusinessId, setSelectedBusinessId] =
+    useState<string | null>(null);
 
-    try {
-      const storedUsers =
-        localStorage.getItem(
-          USERS_STORAGE_KEY,
+  const [checkingAdmin, setCheckingAdmin] =
+    useState(true);
+
+  /*
+   * Load all businesses through the secure
+   * platform-admin RPC.
+   */
+  const loadBusinesses =
+    useCallback(async () => {
+      setError("");
+
+      try {
+        const {
+          data: {
+            session,
+          },
+        } =
+          await supabase.auth.getSession();
+
+        if (!session) {
+          router.replace("/auth");
+          return;
+        }
+
+        const admin =
+          await isPlatformAdmin();
+
+        if (!admin) {
+          router.replace("/");
+          return;
+        }
+
+        const {
+          data,
+          error: rpcError,
+        } =
+          await supabase.rpc(
+            "get_platform_businesses",
+          );
+
+        if (rpcError) {
+          throw new Error(
+            rpcError.message ||
+              "Unable to load businesses.",
+          );
+        }
+
+        const rows =
+          (data ?? []) as BusinessRecord[];
+
+        rows.sort((a, b) =>
+          String(b.created_at).localeCompare(
+            String(a.created_at),
+          ),
         );
 
-      if (!storedUsers) {
-        return;
+        setBusinesses(rows);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Unable to load businesses.",
+        );
+      } finally {
+        setLoading(false);
+        setCheckingAdmin(false);
+      }
+    }, [router]);
+
+  useEffect(() => {
+    void loadBusinesses();
+  }, [loadBusinesses]);
+
+  /*
+   * Run an administrator action and then refresh
+   * the business list from Supabase.
+   */
+  async function performBusinessAction(
+    action:
+      | "approve"
+      | "reject"
+      | "suspend"
+      | "reactivate",
+    business: BusinessRecord,
+  ) {
+    setError("");
+    setSuccess("");
+
+    let confirmation = "";
+
+    if (action === "approve") {
+      confirmation =
+        `Approve ${business.name}? ` +
+        "This will activate the business for 30 days.";
+    }
+
+    if (action === "reject") {
+      confirmation =
+        `Reject ${business.name}?`;
+    }
+
+    if (action === "suspend") {
+      confirmation =
+        `Suspend ${business.name}? ` +
+        "The business will lose normal access.";
+    }
+
+    if (action === "reactivate") {
+      confirmation =
+        `Reactivate ${business.name}? ` +
+        "This will activate the business for 30 days.";
+    }
+
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(confirmation)
+    ) {
+      return;
+    }
+
+    setActionLoading(
+      `${action}:${business.id}`,
+    );
+
+    try {
+      if (action === "approve") {
+        const {
+          error: rpcError,
+        } =
+          await supabase.rpc(
+            "approve_business",
+            {
+              p_business_id:
+                business.id,
+              p_subscription_days: 30,
+            },
+          );
+
+        if (rpcError) {
+          throw new Error(
+            rpcError.message ||
+              "Unable to approve business.",
+          );
+        }
+
+        setSuccess(
+          `${business.name} has been approved and activated for 30 days.`,
+        );
       }
 
-      const users: StoredUser[] =
-        JSON.parse(storedUsers);
+      if (action === "reject") {
+        const {
+          error: rpcError,
+        } =
+          await supabase.rpc(
+            "reject_business",
+            {
+              p_business_id:
+                business.id,
+            },
+          );
 
-      if (!Array.isArray(users)) {
-        return;
+        if (rpcError) {
+          throw new Error(
+            rpcError.message ||
+              "Unable to reject business.",
+          );
+        }
+
+        setSuccess(
+          `${business.name} has been rejected.`,
+        );
       }
 
-      const updatedUsers = users.map(
-        (user) => {
-          if (user.id !== ownerUserId) {
-            return user;
-          }
+      if (action === "suspend") {
+        const {
+          error: rpcError,
+        } =
+          await supabase.rpc(
+            "suspend_business",
+            {
+              p_business_id:
+                business.id,
+            },
+          );
 
-          return {
-            ...user,
-            active: true,
-          };
-        },
-      );
+        if (rpcError) {
+          throw new Error(
+            rpcError.message ||
+              "Unable to suspend business.",
+          );
+        }
 
-      localStorage.setItem(
-        USERS_STORAGE_KEY,
-        JSON.stringify(updatedUsers),
+        setSuccess(
+          `${business.name} has been suspended.`,
+        );
+      }
+
+      if (action === "reactivate") {
+        const {
+          error: rpcError,
+        } =
+          await supabase.rpc(
+            "reactivate_business",
+            {
+              p_business_id:
+                business.id,
+              p_subscription_days: 30,
+            },
+          );
+
+        if (rpcError) {
+          throw new Error(
+            rpcError.message ||
+              "Unable to reactivate business.",
+          );
+        }
+
+        setSuccess(
+          `${business.name} has been reactivated for 30 days.`,
+        );
+      }
+
+      await loadBusinesses();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to complete administrator action.",
       );
-    } catch {
-      // Ignore malformed local storage data.
+    } finally {
+      setActionLoading("");
     }
   }
 
-  function handleMarkPaymentPaid(
-    business: Business,
-  ) {
-    const updated = updateBusiness(
-      business.id,
-      {
-        paymentStatus: "paid",
-      },
-    );
+  async function handleLogout() {
+    setError("");
 
-    if (updated) {
-      loadBusinesses();
+    try {
+      await supabase.auth.signOut();
+    } finally {
+      router.replace("/auth");
     }
   }
 
-  function handleApprove(
-    business: Business,
-  ) {
-    if (business.paymentStatus !== "paid") {
-      window.alert(
-        "Payment must be marked as paid before approving this business.",
+  const filteredBusinesses =
+    useMemo(() => {
+      if (filter === "all") {
+        return businesses;
+      }
+
+      return businesses.filter(
+        (business) =>
+          business.status === filter,
       );
-      return;
-    }
+    }, [businesses, filter]);
 
-    const confirmed =
-      window.confirm(
-        `Approve ${business.businessName}? The business owner will be allowed to access RwandaInventory.`,
-      );
+  const counts = useMemo(() => {
+    return {
+      all: businesses.length,
 
-    if (!confirmed) {
-      return;
-    }
+      pending: businesses.filter(
+        (business) =>
+          business.status === "pending",
+      ).length,
 
-    const updated = approveBusiness(
-      business.id,
-      30,
-    );
+      active: businesses.filter(
+        (business) =>
+          business.status === "active",
+      ).length,
 
-    if (!updated) {
-      window.alert(
-        "The business could not be approved.",
-      );
-      return;
-    }
+      rejected: businesses.filter(
+        (business) =>
+          business.status === "rejected",
+      ).length,
 
-    activateBusinessOwner(
-      business.ownerUserId,
-    );
-
-    loadBusinesses();
-
-    window.alert(
-      `${business.businessName} has been approved and activated for 30 days.`,
-    );
-  }
-
-  function handleReject(
-    business: Business,
-  ) {
-    const confirmed =
-      window.confirm(
-        `Reject ${business.businessName}?`,
-      );
-
-    if (!confirmed) {
-      return;
-    }
-
-    const updated = rejectBusiness(
-      business.id,
-    );
-
-    if (updated) {
-      loadBusinesses();
-      setSelectedBusinessId(null);
-    }
-  }
-
-  function handleSuspend(
-    business: Business,
-  ) {
-    const confirmed =
-      window.confirm(
-        `Suspend ${business.businessName}? The business will no longer be active.`,
-      );
-
-    if (!confirmed) {
-      return;
-    }
-
-    const updated = suspendBusiness(
-      business.id,
-    );
-
-    if (updated) {
-      loadBusinesses();
-    }
-  }
-
-  function handleReactivate(
-    business: Business,
-  ) {
-    const confirmed =
-      window.confirm(
-        `Reactivate ${business.businessName}?`,
-      );
-
-    if (!confirmed) {
-      return;
-    }
-
-    const updated = updateBusiness(
-      business.id,
-      {
-        status: "active",
-        paymentStatus: "paid",
-      },
-    );
-
-    if (updated) {
-      activateBusinessOwner(
-        business.ownerUserId,
-      );
-
-      loadBusinesses();
-    }
-  }
-
-  function handleLogout() {
-    logoutAdmin();
-    router.replace("/admin");
-  }
+      suspended: businesses.filter(
+        (business) =>
+          business.status === "suspended",
+      ).length,
+    };
+  }, [businesses]);
 
   function formatDate(
-    date: string | null,
+    value: string | null,
   ) {
-    if (!date) {
-      return "Not started";
+    if (!value) {
+      return "—";
     }
 
-    return new Date(
-      date,
-    ).toLocaleString();
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    return date.toLocaleString();
   }
 
-  function getStatusClass(
-    status: Business["status"],
+  function statusClasses(
+    status: BusinessStatus,
   ) {
-    if (status === "active") {
-      return "bg-green-100 text-green-800";
-    }
+    switch (status) {
+      case "active":
+        return "bg-green-100 text-green-700";
 
-    if (status === "pending") {
-      return "bg-yellow-100 text-yellow-800";
-    }
+      case "pending":
+        return "bg-amber-100 text-amber-700";
 
-    if (status === "suspended") {
-      return "bg-orange-100 text-orange-800";
-    }
+      case "rejected":
+        return "bg-red-100 text-red-700";
 
-    return "bg-red-100 text-red-800";
+      case "suspended":
+        return "bg-slate-200 text-slate-700";
+
+      default:
+        return "bg-slate-100 text-slate-700";
+    }
   }
 
-  function getPaymentClass(
-    paymentStatus: Business["paymentStatus"],
+  function paymentClasses(
+    status: PaymentStatus | null,
   ) {
-    if (paymentStatus === "paid") {
-      return "bg-green-100 text-green-800";
-    }
+    switch (status) {
+      case "paid":
+        return "bg-green-100 text-green-700";
 
-    if (paymentStatus === "overdue") {
-      return "bg-red-100 text-red-800";
-    }
+      case "pending":
+        return "bg-amber-100 text-amber-700";
 
-    return "bg-yellow-100 text-yellow-800";
+      case "unpaid":
+        return "bg-red-100 text-red-700";
+
+      default:
+        return "bg-slate-100 text-slate-700";
+    }
   }
 
-  const totalBusinesses =
-    businesses.length;
-
-  const pendingBusinesses =
-    businesses.filter(
-      (business) =>
-        business.status === "pending",
-    ).length;
-
-  const activeBusinesses =
-    businesses.filter(
-      (business) =>
-        business.status === "active",
-    ).length;
-
-  const paidBusinesses =
-    businesses.filter(
-      (business) =>
-        business.paymentStatus === "paid",
-    ).length;
-
-  const pendingPayments =
-    businesses.filter(
-      (business) =>
-        business.paymentStatus === "pending",
-    ).length;
-
-  const suspendedBusinesses =
-    businesses.filter(
-      (business) =>
-        business.status === "suspended",
-    ).length;
-
-  const rejectedBusinesses =
-    businesses.filter(
-      (business) =>
-        business.status === "rejected",
-    ).length;
-
-  const selectedBusiness =
-    businesses.find(
-      (business) =>
-        business.id === selectedBusinessId,
-    ) ?? null;
-
-  if (loading) {
+  if (checkingAdmin) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-gray-100">
-        <p className="text-gray-600">
-          Loading admin dashboard...
-        </p>
+      <main className="min-h-screen bg-slate-50 p-6">
+        <div className="mx-auto flex min-h-[80vh] max-w-4xl items-center justify-center">
+          <div className="rounded-2xl bg-white p-10 text-center shadow-sm">
+            <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-slate-900" />
+
+            <p className="text-sm text-slate-600">
+              Checking platform administrator access...
+            </p>
+          </div>
+        </div>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-gray-100">
+    <main className="min-h-screen bg-slate-50">
       <header className="border-b bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-5">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">
-              RwandaInventory Admin
+            <h1 className="text-2xl font-bold text-slate-900">
+              RwandaInventory
             </h1>
 
-            <p className="mt-1 text-sm text-gray-600">
-              Manage businesses and platform access
+            <p className="mt-1 text-sm text-slate-500">
+              Platform Administration
             </p>
           </div>
 
           <button
             type="button"
             onClick={handleLogout}
-            className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
+            className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
           >
-            Admin Logout
+            Sign Out
           </button>
         </div>
       </header>
 
       <div className="mx-auto max-w-7xl px-6 py-8">
-        <section className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-xl bg-white p-5 shadow-sm">
-            <p className="text-sm text-gray-500">
-              Total Businesses
-            </p>
-
-            <p className="mt-2 text-3xl font-bold text-gray-900">
-              {totalBusinesses}
-            </p>
+        {error && (
+          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm leading-6 text-red-700">
+            {error}
           </div>
+        )}
 
-          <div className="rounded-xl bg-white p-5 shadow-sm">
-            <p className="text-sm text-gray-500">
-              Pending Approval
-            </p>
-
-            <p className="mt-2 text-3xl font-bold text-yellow-600">
-              {pendingBusinesses}
-            </p>
+        {success && (
+          <div className="mb-6 rounded-xl border border-green-200 bg-green-50 p-4 text-sm leading-6 text-green-700">
+            {success}
           </div>
+        )}
 
-          <div className="rounded-xl bg-white p-5 shadow-sm">
-            <p className="text-sm text-gray-500">
-              Active Businesses
+        <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          <button
+            type="button"
+            onClick={() =>
+              setFilter("all")
+            }
+            className={`rounded-2xl p-5 text-left shadow-sm transition ${
+              filter === "all"
+                ? "ring-2 ring-slate-900"
+                : ""
+            } bg-white`}
+          >
+            <p className="text-sm font-medium text-slate-500">
+              All Businesses
+            </p>
+
+            <p className="mt-2 text-3xl font-bold text-slate-900">
+              {counts.all}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              setFilter("pending")
+            }
+            className={`rounded-2xl p-5 text-left shadow-sm transition ${
+              filter === "pending"
+                ? "ring-2 ring-amber-500"
+                : ""
+            } bg-white`}
+          >
+            <p className="text-sm font-medium text-slate-500">
+              Pending
+            </p>
+
+            <p className="mt-2 text-3xl font-bold text-amber-600">
+              {counts.pending}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              setFilter("active")
+            }
+            className={`rounded-2xl p-5 text-left shadow-sm transition ${
+              filter === "active"
+                ? "ring-2 ring-green-600"
+                : ""
+            } bg-white`}
+          >
+            <p className="text-sm font-medium text-slate-500">
+              Active
             </p>
 
             <p className="mt-2 text-3xl font-bold text-green-600">
-              {activeBusinesses}
+              {counts.active}
             </p>
-          </div>
+          </button>
 
-          <div className="rounded-xl bg-white p-5 shadow-sm">
-            <p className="text-sm text-gray-500">
-              Paid Businesses
-            </p>
-
-            <p className="mt-2 text-3xl font-bold text-blue-600">
-              {paidBusinesses}
-            </p>
-          </div>
-
-          <div className="rounded-xl bg-white p-5 shadow-sm">
-            <p className="text-sm text-gray-500">
-              Pending Payments
-            </p>
-
-            <p className="mt-2 text-3xl font-bold text-yellow-600">
-              {pendingPayments}
-            </p>
-          </div>
-
-          <div className="rounded-xl bg-white p-5 shadow-sm">
-            <p className="text-sm text-gray-500">
-              Suspended
-            </p>
-
-            <p className="mt-2 text-3xl font-bold text-orange-600">
-              {suspendedBusinesses}
-            </p>
-          </div>
-
-          <div className="rounded-xl bg-white p-5 shadow-sm">
-            <p className="text-sm text-gray-500">
+          <button
+            type="button"
+            onClick={() =>
+              setFilter("rejected")
+            }
+            className={`rounded-2xl p-5 text-left shadow-sm transition ${
+              filter === "rejected"
+                ? "ring-2 ring-red-500"
+                : ""
+            } bg-white`}
+          >
+            <p className="text-sm font-medium text-slate-500">
               Rejected
             </p>
 
             <p className="mt-2 text-3xl font-bold text-red-600">
-              {rejectedBusinesses}
+              {counts.rejected}
             </p>
-          </div>
-        </section>
+          </button>
 
-        <section className="rounded-xl bg-white shadow-sm">
-          <div className="border-b px-6 py-5">
-            <h2 className="text-xl font-bold text-gray-900">
-              Businesses
-            </h2>
-
-            <p className="mt-1 text-sm text-gray-600">
-              Review businesses registered on RwandaInventory.
+          <button
+            type="button"
+            onClick={() =>
+              setFilter("suspended")
+            }
+            className={`rounded-2xl p-5 text-left shadow-sm transition ${
+              filter === "suspended"
+                ? "ring-2 ring-slate-700"
+                : ""
+            } bg-white`}
+          >
+            <p className="text-sm font-medium text-slate-500">
+              Suspended
             </p>
+
+            <p className="mt-2 text-3xl font-bold text-slate-700">
+              {counts.suspended}
+            </p>
+          </button>
+        </div>
+
+        <section className="rounded-2xl bg-white shadow-sm">
+          <div className="flex flex-col gap-4 border-b px-6 py-5 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-xl font-bold text-slate-900">
+                Businesses
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-500">
+                Businesses are loaded directly from
+                Supabase.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() =>
+                void loadBusinesses()
+              }
+              disabled={
+                loading ||
+                actionLoading !== ""
+              }
+              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
+            >
+              Refresh
+            </button>
           </div>
 
-          {businesses.length === 0 ? (
-            <div className="px-6 py-12 text-center">
-              <p className="text-gray-500">
-                No businesses have registered yet.
+          {loading ? (
+            <div className="p-10 text-center">
+              <div className="mx-auto mb-4 h-9 w-9 animate-spin rounded-full border-4 border-slate-200 border-t-slate-900" />
+
+              <p className="text-sm text-slate-500">
+                Loading businesses...
+              </p>
+            </div>
+          ) : filteredBusinesses.length ===
+            0 ? (
+            <div className="p-12 text-center">
+              <p className="font-semibold text-slate-700">
+                No businesses found.
+              </p>
+
+              <p className="mt-1 text-sm text-slate-500">
+                There are no businesses matching
+                this filter.
               </p>
             </div>
           ) : (
-            <div className="divide-y">
-              {businesses.map(
-                (business) => (
-                  <div
-                    key={business.id}
-                    className="p-6"
-                  >
-                    <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-                      <div className="flex-1">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <h3 className="text-xl font-bold text-gray-900">
-                            {
-                              business.businessName
-                            }
-                          </h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-left">
+                <thead className="border-b bg-slate-50">
+                  <tr>
+                    <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Business
+                    </th>
 
-                          <span
-                            className={`rounded-full px-3 py-1 text-xs font-semibold ${getStatusClass(
-                              business.status,
-                            )}`}
-                          >
-                            {business.status
-                              .charAt(0)
-                              .toUpperCase() +
-                              business.status.slice(
-                                1,
-                              )}
-                          </span>
+                    <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Contact
+                    </th>
 
-                          <span
-                            className={`rounded-full px-3 py-1 text-xs font-semibold ${getPaymentClass(
-                              business.paymentStatus,
-                            )}`}
-                          >
-                            Payment:{" "}
-                            {business.paymentStatus
-                              .charAt(0)
-                              .toUpperCase() +
-                              business.paymentStatus.slice(
-                                1,
-                              )}
-                          </span>
-                        </div>
+                    <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Status
+                    </th>
 
-                        <div className="mt-4 grid gap-4 text-sm md:grid-cols-2 lg:grid-cols-4">
-                          <div>
-                            <p className="text-gray-500">
-                              Plan
-                            </p>
+                    <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Payment
+                    </th>
 
-                            <p className="font-medium text-gray-900">
-                              {business.plan}
-                            </p>
-                          </div>
+                    <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Plan
+                    </th>
 
-                          <div>
-                            <p className="text-gray-500">
-                              Registered
-                            </p>
+                    <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Subscription
+                    </th>
 
-                            <p className="font-medium text-gray-900">
-                              {formatDate(
-                                business.createdAt,
-                              )}
-                            </p>
-                          </div>
+                    <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
 
-                          <div>
-                            <p className="text-gray-500">
-                              Subscription Start
-                            </p>
+                <tbody className="divide-y">
+                  {filteredBusinesses.map(
+                    (business) => {
+                      const selected =
+                        selectedBusinessId ===
+                        business.id;
 
-                            <p className="font-medium text-gray-900">
-                              {formatDate(
-                                business.subscriptionStartDate,
-                              )}
-                            </p>
-                          </div>
+                      const approving =
+                        actionLoading ===
+                        `approve:${business.id}`;
 
-                          <div>
-                            <p className="text-gray-500">
-                              Subscription End
-                            </p>
+                      const rejecting =
+                        actionLoading ===
+                        `reject:${business.id}`;
 
-                            <p className="font-medium text-gray-900">
-                              {formatDate(
-                                business.subscriptionEndDate,
-                              )}
-                            </p>
-                          </div>
-                        </div>
+                      const suspending =
+                        actionLoading ===
+                        `suspend:${business.id}`;
 
-                        <div className="mt-5 grid gap-4 text-sm md:grid-cols-2">
-                          <div>
-                            <p className="text-gray-500">
-                              Owner ID
-                            </p>
+                      const reactivating =
+                        actionLoading ===
+                        `reactivate:${business.id}`;
 
-                            <p className="break-all font-mono text-xs text-gray-800">
-                              {
-                                business.ownerUserId
-                              }
-                            </p>
-                          </div>
-
-                          <div>
-                            <p className="text-gray-500">
-                              Business ID
-                            </p>
-
-                            <p className="break-all font-mono text-xs text-gray-800">
-                              {business.id}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap gap-2 lg:w-56 lg:flex-col">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setSelectedBusinessId(
-                              business.id,
-                            )
-                          }
-                          className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
+                      return (
+                        <tbody
+                          key={business.id}
+                          className="contents"
                         >
-                          Manage Business
-                        </button>
-
-                        {business.paymentStatus !==
-                          "paid" &&
-                          business.status !==
-                            "rejected" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleMarkPaymentPaid(
-                                  business,
-                                )
-                              }
-                              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-                            >
-                              Mark Payment Paid
-                            </button>
-                          )}
-
-                        {business.status ===
-                          "pending" && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleApprove(
-                                business,
-                              )
-                            }
-                            className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"
+                          <tr
+                            className={`transition hover:bg-slate-50 ${
+                              selected
+                                ? "bg-slate-50"
+                                : ""
+                            }`}
                           >
-                            Approve
-                          </button>
-                        )}
+                            <td className="px-6 py-5 align-top">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedBusinessId(
+                                    selected
+                                      ? null
+                                      : business.id,
+                                  )
+                                }
+                                className="text-left"
+                              >
+                                <p className="font-semibold text-slate-900">
+                                  {
+                                    business.name
+                                  }
+                                </p>
 
-                        {business.status ===
-                          "pending" && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleReject(
-                                business,
-                              )
-                            }
-                            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
-                          >
-                            Reject
-                          </button>
-                        )}
+                                <p className="mt-1 max-w-xs text-xs text-slate-500">
+                                  {business.address ||
+                                    "No address provided"}
+                                </p>
 
-                        {business.status ===
-                          "active" && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleSuspend(
-                                business,
-                              )
-                            }
-                            className="rounded-lg bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700"
-                          >
-                            Suspend
-                          </button>
-                        )}
+                                <p className="mt-1 break-all text-xs text-slate-400">
+                                  {
+                                    business.id
+                                  }
+                                </p>
+                              </button>
+                            </td>
 
-                        {business.status ===
-                          "suspended" && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleReactivate(
-                                business,
-                              )
-                            }
-                            className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"
-                          >
-                            Reactivate
-                          </button>
-                        )}
-                      </div>
-                    </div>
+                            <td className="px-6 py-5 align-top">
+                              <p className="text-sm text-slate-700">
+                                {business.phone ||
+                                  "No phone"}
+                              </p>
 
-                    {selectedBusinessId ===
-                      business.id && (
-                      <div className="mt-6 rounded-xl border bg-gray-50 p-5">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <h4 className="text-lg font-bold text-gray-900">
-                              Business Management
-                            </h4>
+                              <p className="mt-1 text-xs text-slate-500">
+                                Created{" "}
+                                {formatDate(
+                                  business.created_at,
+                                )}
+                              </p>
+                            </td>
 
-                            <p className="text-sm text-gray-600">
-                              {
-                                business.businessName
-                              }
-                            </p>
-                          </div>
+                            <td className="px-6 py-5 align-top">
+                              <span
+                                className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold capitalize ${statusClasses(
+                                  business.status,
+                                )}`}
+                              >
+                                {
+                                  business.status
+                                }
+                              </span>
+                            </td>
 
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setSelectedBusinessId(
-                                null,
-                              )
-                            }
-                            className="rounded-lg border bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                          >
-                            Close
-                          </button>
-                        </div>
+                            <td className="px-6 py-5 align-top">
+                              <span
+                                className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold capitalize ${paymentClasses(
+                                  business.payment_status,
+                                )}`}
+                              >
+                                {
+                                  business.payment_status ||
+                                  "—"
+                                }
+                              </span>
+                            </td>
 
-                        <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                          <div className="rounded-lg bg-white p-4">
-                            <p className="text-xs text-gray-500">
-                              Current Status
-                            </p>
+                            <td className="px-6 py-5 align-top">
+                              <p className="text-sm font-semibold text-slate-800">
+                                {business.plan ||
+                                  "—"}
+                              </p>
 
-                            <p className="mt-1 font-semibold text-gray-900">
-                              {business.status}
-                            </p>
-                          </div>
+                              <p className="mt-1 text-xs text-slate-500">
+                                {
+                                  business.currency
+                                }
+                              </p>
+                            </td>
 
-                          <div className="rounded-lg bg-white p-4">
-                            <p className="text-xs text-gray-500">
-                              Payment
-                            </p>
+                            <td className="px-6 py-5 align-top">
+                              <p className="text-xs text-slate-600">
+                                Start
+                              </p>
 
-                            <p className="mt-1 font-semibold text-gray-900">
-                              {
-                                business.paymentStatus
-                              }
-                            </p>
-                          </div>
+                              <p className="text-sm font-medium text-slate-800">
+                                {formatDate(
+                                  business.subscription_start_date,
+                                )}
+                              </p>
 
-                          <div className="rounded-lg bg-white p-4">
-                            <p className="text-xs text-gray-500">
-                              Plan
-                            </p>
+                              <p className="mt-2 text-xs text-slate-600">
+                                End
+                              </p>
 
-                            <p className="mt-1 font-semibold text-gray-900">
-                              {business.plan}
-                            </p>
-                          </div>
+                              <p className="text-sm font-medium text-slate-800">
+                                {formatDate(
+                                  business.subscription_end_date,
+                                )}
+                              </p>
+                            </td>
 
-                          <div className="rounded-lg bg-white p-4">
-                            <p className="text-xs text-gray-500">
-                              Subscription
-                            </p>
+                            <td className="px-6 py-5 align-top">
+                              <div className="flex min-w-[150px] flex-col gap-2">
+                                {business.status ===
+                                  "pending" && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void performBusinessAction(
+                                          "approve",
+                                          business,
+                                        )
+                                      }
+                                      disabled={
+                                        actionLoading !==
+                                        ""
+                                      }
+                                      className="rounded-lg bg-green-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {approving
+                                        ? "Approving..."
+                                        : "Approve"}
+                                    </button>
 
-                            <p className="mt-1 font-semibold text-gray-900">
-                              {business.subscriptionEndDate
-                                ? `Until ${formatDate(
-                                    business.subscriptionEndDate,
-                                  )}`
-                                : "Not started"}
-                            </p>
-                          </div>
-                        </div>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void performBusinessAction(
+                                          "reject",
+                                          business,
+                                        )
+                                      }
+                                      disabled={
+                                        actionLoading !==
+                                        ""
+                                      }
+                                      className="rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {rejecting
+                                        ? "Rejecting..."
+                                        : "Reject"}
+                                    </button>
+                                  </>
+                                )}
 
-                        <div className="mt-5 flex flex-wrap gap-3">
-                          {business.paymentStatus !==
-                            "paid" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleMarkPaymentPaid(
-                                  business,
-                                )
-                              }
-                              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-                            >
-                              Confirm Payment
-                            </button>
+                                {business.status ===
+                                  "active" && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void performBusinessAction(
+                                        "suspend",
+                                        business,
+                                      )
+                                    }
+                                    disabled={
+                                      actionLoading !==
+                                      ""
+                                    }
+                                    className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    {suspending
+                                      ? "Suspending..."
+                                      : "Suspend"}
+                                  </button>
+                                )}
+
+                                {business.status ===
+                                  "suspended" && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void performBusinessAction(
+                                        "reactivate",
+                                        business,
+                                      )
+                                    }
+                                    disabled={
+                                      actionLoading !==
+                                      ""
+                                    }
+                                    className="rounded-lg bg-green-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    {reactivating
+                                      ? "Reactivating..."
+                                      : "Reactivate"}
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+
+                          {selected && (
+                            <tr>
+                              <td
+                                colSpan={7}
+                                className="bg-slate-50 px-6 py-5"
+                              >
+                                <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+                                  <div>
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                      Business ID
+                                    </p>
+
+                                    <p className="mt-1 break-all text-sm text-slate-800">
+                                      {
+                                        business.id
+                                      }
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                      Business Phone
+                                    </p>
+
+                                    <p className="mt-1 text-sm text-slate-800">
+                                      {business.phone ||
+                                        "Not provided"}
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                      Address
+                                    </p>
+
+                                    <p className="mt-1 text-sm text-slate-800">
+                                      {business.address ||
+                                        "Not provided"}
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                      Status
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-semibold capitalize text-slate-800">
+                                      {
+                                        business.status
+                                      }
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                      Payment Status
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-semibold capitalize text-slate-800">
+                                      {
+                                        business.payment_status ||
+                                        "—"
+                                      }
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                      Last Updated
+                                    </p>
+
+                                    <p className="mt-1 text-sm text-slate-800">
+                                      {formatDate(
+                                        business.updated_at,
+                                      )}
+                                    </p>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
                           )}
-
-                          {business.status ===
-                            "pending" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleApprove(
-                                  business,
-                                )
-                              }
-                              className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"
-                            >
-                              Approve Business
-                            </button>
-                          )}
-
-                          {business.status ===
-                            "pending" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleReject(
-                                  business,
-                                )
-                              }
-                              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
-                            >
-                              Reject Business
-                            </button>
-                          )}
-
-                          {business.status ===
-                            "active" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleSuspend(
-                                  business,
-                                )
-                              }
-                              className="rounded-lg bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700"
-                            >
-                              Suspend Business
-                            </button>
-                          )}
-
-                          {business.status ===
-                            "suspended" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleReactivate(
-                                  business,
-                                )
-                              }
-                              className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"
-                            >
-                              Reactivate Business
-                            </button>
-                          )}
-                        </div>
-
-                        <div className="mt-5 rounded-lg border border-blue-200 bg-blue-50 p-4">
-                          <p className="text-sm text-blue-900">
-                            After payment is confirmed and
-                            the business is approved, the
-                            owner account will be activated
-                            and the 30-day subscription will
-                            start.
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ),
-              )}
+                        </tbody>
+                      );
+                    },
+                  )}
+                </tbody>
+              </table>
             </div>
           )}
         </section>
-
-        {selectedBusiness && (
-          <div className="mt-6 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-            <p className="text-sm text-gray-500">
-              Selected business
-            </p>
-
-            <p className="mt-1 font-semibold text-gray-900">
-              {selectedBusiness.businessName}
-            </p>
-          </div>
-        )}
       </div>
     </main>
   );
