@@ -1,3 +1,4 @@
+
 "use client";
 
 import {
@@ -14,11 +15,17 @@ import {
 
 import { supabase } from "../lib/supabase";
 
+type AuthMode = "signin" | "signup";
+
 export default function AuthPage() {
   const router = useRouter();
 
+  const [mode, setMode] = useState<AuthMode>("signin");
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [username, setUsername] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [checkingSession, setCheckingSession] =
@@ -27,13 +34,6 @@ export default function AuthPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  /*
-   * Check whether the authenticated Supabase user
-   * is the RwandaInventory platform administrator.
-   *
-   * We retry because the session may take a short
-   * moment to become available to the RPC.
-   */
   async function checkPlatformAdminWithRetry(
     attempts = 4,
   ): Promise<boolean> {
@@ -51,14 +51,13 @@ export default function AuthPage() {
           return false;
         }
 
-        const platformAdmin =
-          await isPlatformAdmin();
+        const platformAdmin = await isPlatformAdmin();
 
         if (platformAdmin) {
           return true;
         }
       } catch {
-        // Try again below.
+        // Retry below.
       }
 
       if (attempt < attempts) {
@@ -80,10 +79,6 @@ export default function AuthPage() {
           data: { session },
         } = await supabase.auth.getSession();
 
-        /*
-         * No authenticated Supabase user.
-         * Show the normal login page.
-         */
         if (!session) {
           if (!cancelled) {
             setCheckingSession(false);
@@ -92,54 +87,30 @@ export default function AuthPage() {
           return;
         }
 
-        /*
-         * First check for the separate platform
-         * administrator account.
-         */
         const platformAdmin =
           await checkPlatformAdminWithRetry();
 
         if (platformAdmin) {
           if (!cancelled) {
-            router.replace(
-              "/admin/dashboard",
-            );
+            router.replace("/admin/dashboard");
           }
 
           return;
         }
 
-        /*
-         * Otherwise this should be a normal
-         * business account.
-         */
-        const user =
-          await hydrateCurrentUser();
+        const user = await hydrateCurrentUser();
 
         if (cancelled) {
           return;
         }
 
-        /*
-         * Existing valid business membership.
-         */
         if (user) {
           router.replace("/");
           return;
         }
 
-        /*
-         * The Supabase account exists, but it does
-         * not currently have a business membership.
-         *
-         * IMPORTANT:
-         *
-         * Do NOT sign the user out here.
-         *
-         * The business-registration page needs the
-         * authenticated session because the database
-         * function uses auth.uid().
-         */
+        // Keep the authenticated session so the owner
+        // can complete business registration.
         router.replace("/register");
       } catch (err) {
         if (!cancelled) {
@@ -161,7 +132,13 @@ export default function AuthPage() {
     };
   }, [router]);
 
-  async function handleSubmit(
+  function changeMode(nextMode: AuthMode) {
+    setError("");
+    setSuccess("");
+    setMode(nextMode);
+  }
+
+  async function handleSignIn(
     event: FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
@@ -169,39 +146,26 @@ export default function AuthPage() {
     setError("");
     setSuccess("");
 
-    const cleanEmail =
-      email.trim().toLowerCase();
+    const cleanEmail = email.trim().toLowerCase();
 
-    if (!cleanEmail) {
-      setError("Email is required.");
-      return;
-    }
-
-    if (!password) {
-      setError("Password is required.");
+    if (!cleanEmail || !password) {
+      setError("Enter your email and password.");
       return;
     }
 
     setLoading(true);
 
     try {
-      /*
-       * Sign in using Supabase Auth.
-       */
       const {
         data,
         error: signInError,
-      } =
-        await supabase.auth.signInWithPassword({
-          email: cleanEmail,
-          password,
-        });
+      } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password,
+      });
 
       if (signInError) {
-        throw new Error(
-          signInError.message ||
-            "Invalid email or password.",
-        );
+        throw new Error(signInError.message);
       }
 
       if (!data.user || !data.session) {
@@ -210,10 +174,6 @@ export default function AuthPage() {
         );
       }
 
-      /*
-       * Confirm that the session is available before
-       * performing platform-admin or business checks.
-       */
       const {
         data: { session: confirmedSession },
       } = await supabase.auth.getSession();
@@ -224,58 +184,33 @@ export default function AuthPage() {
         );
       }
 
-      /*
-       * Platform administrator.
-       */
       const platformAdmin =
         await checkPlatformAdminWithRetry(5);
 
       if (platformAdmin) {
-        setSuccess(
-          "Admin login successful. Redirecting...",
-        );
+        setSuccess("Admin login successful. Redirecting...");
 
         await new Promise((resolve) =>
           setTimeout(resolve, 150),
         );
 
-        router.replace(
-          "/admin/dashboard",
-        );
-
+        router.replace("/admin/dashboard");
         return;
       }
 
-      /*
-       * Normal business account.
-       */
-      const user =
-        await hydrateCurrentUser();
+      const user = await hydrateCurrentUser();
 
-      /*
-       * Business account exists.
-       */
       if (user) {
-        setSuccess(
-          "Login successful. Redirecting...",
-        );
+        setSuccess("Login successful. Redirecting...");
 
         await new Promise((resolve) =>
           setTimeout(resolve, 150),
         );
 
         router.replace("/");
-
         return;
       }
 
-      /*
-       * Authenticated Supabase account but no
-       * business membership.
-       *
-       * Keep the session alive and allow the user
-       * to complete business registration.
-       */
       setSuccess(
         "Your account is authenticated. Continue with business registration.",
       );
@@ -296,16 +231,38 @@ export default function AuthPage() {
     }
   }
 
-  async function handleForgotPassword() {
+  async function handleSignUp(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
     setError("");
     setSuccess("");
 
-    const cleanEmail =
-      email.trim().toLowerCase();
+    const cleanFullName = fullName.trim();
+    const cleanUsername = username.trim().toLowerCase();
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (!cleanFullName) {
+      setError("Enter your full name.");
+      return;
+    }
+
+    if (cleanUsername.length < 3) {
+      setError(
+        "Username must contain at least 3 characters.",
+      );
+      return;
+    }
 
     if (!cleanEmail) {
+      setError("Enter your email address.");
+      return;
+    }
+
+    if (password.length < 6) {
       setError(
-        "Enter your email address first.",
+        "Your password must contain at least 6 characters.",
       );
       return;
     }
@@ -314,30 +271,90 @@ export default function AuthPage() {
 
     try {
       const redirectTo =
-        typeof window !== "undefined"
-          ? `${window.location.origin}/auth/reset-password`
-          : undefined;
+        `${window.location.origin}/register`;
 
       const {
-        error: resetError,
-      } =
+        data,
+        error: signUpError,
+      } = await supabase.auth.signUp({
+        email: cleanEmail,
+        password,
+        options: {
+          emailRedirectTo: redirectTo,
+          data: {
+            full_name: cleanFullName,
+            username: cleanUsername,
+          },
+        },
+      });
+
+      if (signUpError) {
+        throw new Error(signUpError.message);
+      }
+
+      /*
+       * With email confirmation enabled, Supabase
+       * normally sends an email without creating an
+       * active session. The owner must confirm first.
+       */
+      if (!data.session) {
+        setSuccess(
+          "Your account request has been submitted. Check your email and click the confirmation link. After confirming, you will return to RwandaInventory to complete your business registration. If you don't see the email, check your spam folder.",
+        );
+
+        setPassword("");
+        return;
+      }
+
+      /*
+       * If Supabase returns a session, continue to
+       * business registration.
+       */
+      setSuccess(
+        "Your account has been created. Continue with business registration.",
+      );
+
+      router.replace("/register");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to create your account.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleForgotPassword() {
+    setError("");
+    setSuccess("");
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (!cleanEmail) {
+      setError("Enter your email address first.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const redirectTo =
+        `${window.location.origin}/auth/reset-password`;
+
+      const { error: resetError } =
         await supabase.auth.resetPasswordForEmail(
           cleanEmail,
-          redirectTo
-            ? {
-                redirectTo,
-              }
-            : undefined,
+          { redirectTo },
         );
 
       if (resetError) {
-        throw new Error(
-          resetError.message,
-        );
+        throw new Error(resetError.message);
       }
 
       setSuccess(
-        "Password reset instructions have been sent to your email.",
+        "If an account exists for that email, password reset instructions will be sent to it.",
       );
     } catch (err) {
       setError(
@@ -374,26 +391,89 @@ export default function AuthPage() {
             </h1>
 
             <p className="mt-2 text-sm text-slate-500">
-              Sign in to your account
+              {mode === "signin"
+                ? "Sign in to your account"
+                : "Create your business owner account"}
             </p>
           </div>
 
           {error && (
-            <div className="mb-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            <div
+              role="alert"
+              className="mb-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm leading-6 text-red-700"
+            >
               {error}
             </div>
           )}
 
           {success && (
-            <div className="mb-5 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700">
+            <div
+              role="status"
+              className="mb-5 rounded-xl border border-green-200 bg-green-50 p-4 text-sm leading-6 text-green-700"
+            >
               {success}
             </div>
           )}
 
           <form
-            onSubmit={handleSubmit}
+            onSubmit={
+              mode === "signin"
+                ? handleSignIn
+                : handleSignUp
+            }
             className="space-y-5"
           >
+            {mode === "signup" && (
+              <>
+                <div>
+                  <label
+                    htmlFor="signup-full-name"
+                    className="mb-2 block text-sm font-medium text-slate-700"
+                  >
+                    Full Name
+                  </label>
+
+                  <input
+                    id="signup-full-name"
+                    type="text"
+                    value={fullName}
+                    onChange={(event) =>
+                      setFullName(event.target.value)
+                    }
+                    autoComplete="name"
+                    disabled={loading}
+                    required
+                    placeholder="Your full name"
+                    className="w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="signup-username"
+                    className="mb-2 block text-sm font-medium text-slate-700"
+                  >
+                    Username
+                  </label>
+
+                  <input
+                    id="signup-username"
+                    type="text"
+                    value={username}
+                    onChange={(event) =>
+                      setUsername(event.target.value)
+                    }
+                    autoComplete="username"
+                    disabled={loading}
+                    required
+                    minLength={3}
+                    placeholder="Choose a username"
+                    className="w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
+                  />
+                </div>
+              </>
+            )}
+
             <div>
               <label
                 htmlFor="login-email"
@@ -407,12 +487,11 @@ export default function AuthPage() {
                 type="email"
                 value={email}
                 onChange={(event) =>
-                  setEmail(
-                    event.target.value,
-                  )
+                  setEmail(event.target.value)
                 }
                 autoComplete="email"
                 disabled={loading}
+                required
                 placeholder="you@example.com"
                 className="w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
               />
@@ -431,13 +510,21 @@ export default function AuthPage() {
                 type="password"
                 value={password}
                 onChange={(event) =>
-                  setPassword(
-                    event.target.value,
-                  )
+                  setPassword(event.target.value)
                 }
-                autoComplete="current-password"
+                autoComplete={
+                  mode === "signin"
+                    ? "current-password"
+                    : "new-password"
+                }
                 disabled={loading}
-                placeholder="Your password"
+                required
+                minLength={mode === "signup" ? 6 : undefined}
+                placeholder={
+                  mode === "signin"
+                    ? "Your password"
+                    : "Create a password"
+                }
                 className="w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
               />
             </div>
@@ -448,35 +535,72 @@ export default function AuthPage() {
               className="w-full rounded-xl bg-slate-900 px-5 py-3 font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {loading
-                ? "Signing in..."
-                : "Sign In"}
+                ? mode === "signin"
+                  ? "Signing in..."
+                  : "Creating account..."
+                : mode === "signin"
+                  ? "Sign In"
+                  : "Create Owner Account"}
             </button>
           </form>
 
-          <button
-            type="button"
-            onClick={
-              handleForgotPassword
-            }
-            disabled={loading}
-            className="mt-5 w-full text-center text-sm font-medium text-slate-600 hover:text-slate-900 disabled:opacity-50"
-          >
-            Forgot your password?
-          </button>
+          {mode === "signin" && (
+            <button
+              type="button"
+              onClick={handleForgotPassword}
+              disabled={loading}
+              className="mt-5 w-full text-center text-sm font-medium text-slate-600 hover:text-slate-900 disabled:opacity-50"
+            >
+              Forgot your password?
+            </button>
+          )}
 
           <div className="mt-6 border-t pt-6 text-center">
-            <a
-              href="/register"
-              className="text-sm font-semibold text-blue-700 hover:text-blue-900"
-            >
-              Register a Business
-            </a>
+            {mode === "signin" ? (
+              <>
+                <p className="text-sm text-slate-600">
+                  New to RwandaInventory?
+                </p>
+
+                <button
+                  type="button"
+                  onClick={() => changeMode("signup")}
+                  disabled={loading}
+                  className="mt-2 text-sm font-semibold text-blue-700 hover:text-blue-900 disabled:opacity-50"
+                >
+                  Create a Business Owner Account
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-slate-600">
+                  Already have an account?
+                </p>
+
+                <button
+                  type="button"
+                  onClick={() => changeMode("signin")}
+                  disabled={loading}
+                  className="mt-2 text-sm font-semibold text-blue-700 hover:text-blue-900 disabled:opacity-50"
+                >
+                  Return to Sign In
+                </button>
+              </>
+            )}
+
+            <div className="mt-5">
+              <a
+                href="/register"
+                className="text-sm font-medium text-slate-600 hover:text-slate-900"
+              >
+                Complete Business Registration
+              </a>
+            </div>
           </div>
         </section>
 
         <p className="mt-6 text-center text-xs text-slate-400">
-          Secure authentication powered by
-          Supabase
+          Secure authentication powered by Supabase
         </p>
       </div>
     </main>
